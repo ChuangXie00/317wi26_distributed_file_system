@@ -1,0 +1,83 @@
+services:
+  meta-entry:
+    image: nginx:alpine
+    container_name: meta-entry
+    ports:
+      - "8000:8000"
+    volumes: 
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - meta-01
+    networks:
+      - dfs-net
+
+  meta-01:
+    build: ../services/meta
+    container_name: meta-01
+    environment:
+      - NODE_ID=meta-01
+      - ROLE=leader
+      - REPLICATION_FACTOR=1
+      - STORAGE_NODES=storage-01
+      - METADATA_FILE=metadata.json
+      - DATA_DIR=/data
+    volumes:
+      - ../data/meta:/data
+    networks:
+      - dfs-net
+
+  # 0.1phase1先不使用 meta-02
+  meta-02:
+    build: ../services/meta
+    container_name: meta-02
+    environment:
+      - META_NODE_ID=meta-02
+      - META_ROLE=follower
+      - REPLICATION_FACTOR=1
+      - STORAGE_NODES=storage-01
+      - METADATA_FILE=metadata.json
+      - DATA_DIR=/data
+    volumes:
+      - ../data/meta-follower:/data
+    networks:
+      - dfs-net
+
+  storage-01:
+    build: ../services/storage
+    container_name: storage-01
+    environment:
+      - NODE_ID=storage-01
+      - DATA_DIR=/data
+    volumes:
+      - ../data/storage-01:/data
+    ports:
+      - "9009:9009" # 映射 storage-01 的端口到宿主机，给client访问（仅限Phase1）
+    networks:
+      - dfs-net
+
+  # storage-02, storage-03 在Phase1不使用
+  storage-02:
+    build: ../services/storage
+    container_name: storage-02
+    environment:
+      - NODE_ID=storage-02
+      - DATA_DIR=/data
+    volumes:
+      - ../data/storage-02:/data
+    networks:
+      - dfs-net
+
+  storage-03:
+    build: ../services/storage
+    container_name: storage-03
+    environment:
+      - NODE_ID=storage-03
+      - DATA_DIR=/data
+    volumes:
+      - ../data/storage-03:/data
+    networks:
+      - dfs-net
+
+networks:
+  dfs-net:
+    driver: bridge
