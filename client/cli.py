@@ -18,6 +18,26 @@ console = Console()
 META_BASE = os.getenv("META_BASE", "http://localhost:8000")
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", str(1 * 1024 * 1024)))  # 1MB - default chunk size
 
+# (node_id -> base_url) host mapping for storage nodes
+DEFAULT_STORAGE_HOSTS = (
+    "storage-01=http://localhost:9009,"
+    "storage-02=http://localhost:9010,"
+    "storage-03=http://localhost:9011"
+)
+
+def parse_storage_hosts(raw: str) -> Dict[str, str]:
+    mapping: Dict[str, str] = {}
+    for item in raw.split(","):
+        item = item.strip()
+        if not item or "=" not in item:
+            continue
+        node_id, base_url = item.split("=", 1)
+        mapping[node_id.strip()] = base_url.strip().rstrip("/")
+    return mapping
+
+STORAGE_HOSTS  = parse_storage_hosts(os.getenv("STORAGE_HOSTS", DEFAULT_STORAGE_HOSTS))
+
+
 def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -34,10 +54,27 @@ def iter_chunks(file_path: Path, chunk_size: int):
 def storage_host_url(node_id: str) -> str:
     # Phase1 只映射 storage-01 -> localhost:9009
     # Phase2 可改成从配置文件/映射表解析
-    if node_id == "storage-01":
-        return "http://localhost:9009"
-    raise RuntimeError(f"storage node not mapped to host: {node_id}")
+    base = STORAGE_HOSTS.get(node_id)
+    if not base:
+        raise RuntimeError(f"storage node not mapped to host: {node_id}")
+    return base
 
+def _resolve_chunk_locations(fp: str) -> List[str]:
+    # check first
+    r = requests.post(f"{META_BASE}/chunk/check", json={"fingerprint": fp}, timeout=10)
+    r.raise_for_status()
+    payload = r.json()
+
+    exists = bool(payload.get("exists", False))
+    locations = payload.get("locations", [])
+
+    # exists=False or locations=[] means no replicas available
+    if (not exists) or (not locations):
+        r2 = requests.post(f"{META_BASE}/chunk/register", json={"fingerprint": fp}, timeout=10)
+        r2.raise_for_status()
+        locations = r2.json().get("assigned_nodes", [])
+        
+    return locations
 
 @app.command()
 def upload(file: str, name: str = typer.Option(None, help="file name to store (default: basename)")):
@@ -48,32 +85,31 @@ def upload(file: str, name: str = typer.Option(None, help="file name to store (d
     file_name = name or file_path.name
     fps: List[str] = []
 
-    # 1) chunk -> fp -> check/register -> upload (if needed)
+    # each chunk: hash -> check/register -> upload multiple replicas to storage nodes
     for chunk_bytes in iter_chunks(file_path, CHUNK_SIZE):
         fp = sha256_hex(chunk_bytes)
         fps.append(fp)
 
-        r = requests.post(f"{META_BASE}/chunk/check", json={"fingerprint": fp}, timeout=10)
-        r.raise_for_status()
-        exists = r.json().get("exists", False)
-        locations = r.json().get("locations", [])
+        locations = _resolve_chunk_locations(fp)
 
-        if not exists:
-            r2 = requests.post(f"{META_BASE}/chunk/register", json={"fingerprint": fp}, timeout=10)
-            r2.raise_for_status()
-            locations = r2.json().get("assigned_nodes", [])
-
+        upload_errors: List[str] = []
         for node_id in locations:
-            base = storage_host_url(node_id)
-            up = requests.put(
-                f"{base}/chunk/upload",
-                headers={"fingerprint": fp},
-                data=chunk_bytes,
-                timeout=30,
-            )
-            up.raise_for_status()
+            try:
+                base = storage_host_url(node_id)
+                up = requests.put(
+                    f"{base}/chunk/upload",
+                    headers={"fingerprint": fp},
+                    data=chunk_bytes,
+                    timeout=30,
+                )
+                up.raise_for_status()
+            except requests.RequestException as exc:
+                upload_errors.append(f"{node_id}: {exc}")
 
-    # 2) commit
+        if upload_errors:
+            raise RuntimeError(f"chunk upload failed for {fp}: {upload_errors}")
+
+    # commit to meta node after all chunks uploaded successfully
     c = requests.post(f"{META_BASE}/file/commit", json={"file_name": file_name, "chunks": fps}, timeout=10)
     c.raise_for_status()
 
@@ -104,12 +140,23 @@ def download(name: str, out: str = typer.Option(".", help="output dir")):
             if not locs:
                 raise RuntimeError(f"no replica locations for chunk {fp}")
 
-            # Phase1：只取第一个 location
-            node_id = locs[0]
-            base = storage_host_url(node_id)
-            g = requests.get(f"{base}/chunk/{fp}", timeout=30)
-            g.raise_for_status()
-            f.write(g.content)
+            success = False
+            errors: List[str] = []
+
+            # read fallback, try locations in order until success, if all failed, raise error
+            for node_id in locs:
+                try:
+                    base = storage_host_url(node_id)
+                    g = requests.get(f"{base}/chunk/{fp}", timeout=30)
+                    g.raise_for_status()
+                    f.write(g.content)
+                    success = True
+                    break
+                except requests.RequestException as exc:
+                    errors.append(f"{node_id}: {exc}")
+
+            if not success:
+                raise RuntimeError(f"all replicas failed for chunk {fp}: {errors}")
 
     console.print(f"[green]OK[/green] downloaded to: {out_path}")
 
