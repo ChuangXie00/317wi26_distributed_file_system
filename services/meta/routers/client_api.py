@@ -77,8 +77,37 @@ def chunk_check(req: ChunkCheckReq) -> ChunkCheckResp:
         replicas = [node for node in replicas if node in alive_set]
     else:
         replicas = []
+
+    # only replicas larger than or equal to REPLICATION_FACTOR is considered exists
     exists = len(replicas) >= REPLICATION_FACTOR
     return ChunkCheckResp(exists=exists, locations=replicas)
+
+@router.post("/chunk/register", response_model=ChunkRegisterResp)
+def chunk_register(req: ChunkRegisterReq) -> ChunkRegisterResp:
+    state = load_state()
+    chunks = state.setdefault("chunks", {})
+    alive_nodes = get_alive_storage_nodes(state)
+
+    if len(alive_nodes) < REPLICATION_FACTOR:
+        raise HTTPException(status_code=500, detail="not enough replicas(storage nodes) available")
+    
+    chunk_info = chunks.get(req.fingerprint)
+    if not chunk_info:
+        assigned = choose_replicas(alive_nodes, REPLICATION_FACTOR)
+        chunks[req.fingerprint] = {"replicas": assigned}
+        persist_state(state)
+        return ChunkRegisterResp(assigned_node=assigned)
+    
+    # for existing chunk, if the current replicas are less than REPLICATION_FACTOR
+    # repair it by assign new replicas, and update metadata
+    current_replicas = chunk_info.get("replicas", [])
+    repaired = _repair_chunk_replicas(current_replicas, alive_nodes)
+    if repaired != current_replicas:
+        chunks[req.fingerprint]["replicas"] = repaired
+        persist_state(state)
+    
+    return ChunkRegisterResp(assigned_node=repaired)
+
 
 @router.post("/file/commit", response_model=FileCommitResp)
 def file_commit(req: FileCommitReq) -> FileCommitResp:
@@ -94,6 +123,8 @@ def file_commit(req: FileCommitReq) -> FileCommitResp:
     if len(alive_nodes) < REPLICATION_FACTOR:
         raise HTTPException(status_code=500, detail="not enough replicas(storage nodes) available")
 
+    # repair replicas b4 commit
+    # ensure the chunk replicas are health when commit
     for fp in set(req.chunks):
         current_replicas = chunks.get(fp, {}).get("replicas", [])
         repaired = _repair_chunk_replicas(current_replicas, alive_nodes)
@@ -119,3 +150,14 @@ def file_get(file_name: str) -> FileGetResp:
         out.append(FileGetItem(fingerprint=fp, locations=locations))
 
     return FileGetResp(chunks=out)
+
+@router.get("/debug/leader")
+def debug_leader() -> dict:
+    leader = META_NODE_ID if ROLE == "leader" else "meta-01"
+    return {"leader": leader}
+
+
+@router.get("/debug/membership")
+def debug_membership() -> dict:
+    state = load_state()
+    return {"membership": state.get("membership") or {}}
