@@ -18,7 +18,7 @@ services:
     environment:
       - NODE_ID=meta-01
       - META_ROLE=leader
-      - REPLICATION_FACTOR=1
+      - REPLICATION_FACTOR=2
       - STORAGE_NODES=storage-01, storage-02, storage-03
       - ENABLE_STORAGE_HEALTHCHECK=1
       - STORAGE_PORT=9009

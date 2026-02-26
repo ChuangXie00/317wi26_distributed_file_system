@@ -51,10 +51,10 @@ def _is_storage_alive(node_id: str) -> bool:
     
 def get_alive_storage_nodes(state: State) -> List[str]:
     # Phase02
-    # membership is not implemented yet
     # configure + health check
-    membership = state.get("membership") or {}
+    membership = state.get("membership", {})
     if membership:
+        # membership is not implemented yet, so we assume all nodes are alive
         configured = [node for node in STORAGE_NODES if membership.get(node, "alive") == "alive"]
     else:
         configured = STORAGE_NODES[:]
@@ -64,6 +64,7 @@ def get_alive_storage_nodes(state: State) -> List[str]:
 
     return [node for node in configured if _is_storage_alive(node)]
 
+# choose n nodes as replicas from alive nodes
 def choose_replicas(alive_nodes: List[str], replica_count: int) -> List[str]:
     # select n nodes from alive_nodes, if not enough, raise error
     if replica_count <= 0:
