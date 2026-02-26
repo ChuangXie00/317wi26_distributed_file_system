@@ -24,12 +24,16 @@ services:
       - STORAGE_PORT=9009
       - METADATA_FILE=metadata.json
       - DATA_DIR=/data
+      # 0.1p03 heartbeat and membership timeout settings
+      - HEARTBEAT_INTERVAL_SEC=3
+      - HEARTBEAT_TIMEOUT_SEC=9
+      - MEMBERSHIP_SWEEP_INTERVAL_SEC=1
     volumes:
       - ../data/meta:/data
     networks:
       - dfs-net
 
-  # 0.1phase2 haven't enabled follower sync/taking control, meta-02 is only a container
+  # 0.1p03 haven't enabled follower sync/taking control, meta-02 is only a container
   meta-02:
     build: ../services/meta
     container_name: meta-02
@@ -42,6 +46,10 @@ services:
       - STORAGE_PORT=9009
       - METADATA_FILE=metadata.json
       - DATA_DIR=/data
+      # 0.1p03 heartbeat and membership timeout settings
+      - HEARTBEAT_INTERVAL_SEC=3
+      - HEARTBEAT_TIMEOUT_SEC=9
+      - MEMBERSHIP_SWEEP_INTERVAL_SEC=1
     volumes:
       - ../data/meta-follower:/data
     networks:
@@ -53,10 +61,16 @@ services:
     environment:
       - NODE_ID=storage-01
       - DATA_DIR=/data
+      # 0.1p03 storage send heartbeat to meta-engty every x seconds
+      - META_ENTRY_BASE_URL=http://meta-entry:8000
+      - STORAGE_HEARTBEAT_INTERVAL_SEC=3
+      - STORAGE_HEARTBEAT_TIMEOUT_SEC=2 
     volumes:
       - ../data/storage-01:/data
     ports:
       - "9009:9009" # <host:container>map storage-01 port to host for client access
+    depends_on:
+      - meta-entry
     networks:
       - dfs-net
 
@@ -67,10 +81,15 @@ services:
     environment:
       - NODE_ID=storage-02
       - DATA_DIR=/data
+      - META_ENTRY_BASE_URL=http://meta-entry:8000
+      - STORAGE_HEARTBEAT_INTERVAL_SEC=3
+      - STORAGE_HEARTBEAT_TIMEOUT_SEC=2
     volumes:
       - ../data/storage-02:/data
     ports:
       - "9010:9009"
+    depends_on:
+      - meta-entry
     networks:
       - dfs-net
 
@@ -80,10 +99,15 @@ services:
     environment:
       - NODE_ID=storage-03
       - DATA_DIR=/data
+      - META_ENTRY_BASE_URL=http://meta-entry:8000
+      - STORAGE_HEARTBEAT_INTERVAL_SEC=3
+      - STORAGE_HEARTBEAT_TIMEOUT_SEC=2
     volumes:
       - ../data/storage-03:/data
     ports:
       - "9011:9009"
+    depends_on:
+      - meta-entry
     networks:
       - dfs-net
 
