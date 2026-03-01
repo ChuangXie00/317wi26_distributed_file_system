@@ -26,7 +26,7 @@ def _timestamp_to_iso(ts: float) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 def _normalize_status(raw_status: str) -> str:
-    normalized = (raw_status or "").strip().lower()
+    normalized = str(raw_status or "").strip().lower()
     if normalized in {"alive", "dead", "suspected"}:
         return normalized
     return "dead"
