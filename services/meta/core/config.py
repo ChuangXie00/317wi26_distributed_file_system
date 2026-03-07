@@ -24,7 +24,13 @@ def build_pg_conn_kwargs() -> Dict[str, Any]:
     return {
         "host": PG_HOST,
         "port": PG_PORT,
-
+        "dbname": PG_DATABASE,
+        "user": PG_USER,
+        "password": PG_PASSWORD,
+        "connect_timeout": PG_CONNECT_TIMEOUT_SEC,
+        "sslmode": PG_SSLMODE,
+        # add statement_timeout to every connection
+        "options": f"-c statement_timeout={PG_STATEMENT_TIMEOUT_MS}",
     }
 
 
