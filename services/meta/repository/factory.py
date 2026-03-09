@@ -2,10 +2,10 @@ from typing import Any, Dict, List, Optional
 
 from core.config import DEFAULT_NAMESPACE, build_pg_conn_kwargs
 
-from .chunk_repository import ChunkRepository
-from .file_repository import FileRepository
 from .infra.connection import PostgresConnectionFactory
 from .infra.schema import PostgresSchemaManager
+from .postgres.chunk_repository import ChunkRepository
+from .postgres.file_repository import FileRepository
 
 
 class PostgresMetadataRepository:

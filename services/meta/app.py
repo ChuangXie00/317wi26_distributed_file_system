@@ -2,7 +2,7 @@ import time
 
 from fastapi import FastAPI
 
-from core.repository_pg import init_repository_schema
+from repository import init_repository_schema
 from routers.client_api import router as client_router
 
 # main app for init router, logic is in routers and core

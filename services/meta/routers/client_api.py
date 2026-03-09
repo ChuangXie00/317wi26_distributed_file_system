@@ -11,7 +11,6 @@ from core.config import (
     ROLE,
     STORAGE_NODES
 )
-from core.repository_pg import get_repository
 from core.state import (
     State,
     choose_replicas, 
@@ -23,6 +22,7 @@ from core.state import (
     persist_state,
     refresh_storage_membership,
 )
+from repository import get_repository
 
 router = APIRouter()
 REPO = get_repository()
