@@ -69,3 +69,11 @@ PG_PASSWORD = os.getenv("PG_PASSWORD", "dfs_pass")
 PG_SSLMODE = os.getenv("PG_SSLMODE", "disable")
 PG_CONNECT_TIMEOUT_SEC = _parse_int_env("PG_CONNECT_TIMEOUT_SEC", 5)
 PG_STATEMENT_TIMEOUT_MS = _parse_int_env("PG_STATEMENT_TIMEOUT_MS", 8000)
+
+# 0.1p04: meta leader/follower 同步参数
+META_FOLLOWER_URLS = _parse_csv_env("META_FOLLOWER_URLS", "")
+META_LEADER_URL = os.getenv("META_LEADER_URL", "http://meta-01:8000").strip().rstrip("/")
+META_INTERNAL_TIMEOUT_SEC = _parse_float_env("META_INTERNAL_TIMEOUT_SEC", 2.0)
+META_HEARTBEAT_INTERVAL_SEC = _parse_float_env("META_HEARTBEAT_INTERVAL_SEC", 3.0)
+META_SYNC_INTERVAL_SEC = _parse_float_env("META_SYNC_INTERVAL_SEC", 5.0)
+META_LEADER_HEARTBEAT_TIMEOUT_SEC = _parse_float_env("META_LEADER_HEARTBEAT_TIMEOUT_SEC", 9.0)
