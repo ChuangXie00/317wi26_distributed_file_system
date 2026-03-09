@@ -1,4 +1,23 @@
 services:
+  # Postgres DB (01P3.1)
+  postgres:
+    image: postgres:16-alpine
+    container_name: dfs-postgres
+    environment:
+      - POSTGRES_DB=dfs_meta
+      - POSTGRES_USER=dfs_user
+      - POSTGRES_PASSWORD=dfs_pass
+    volumes:
+      - ../data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dfs_user -d dfs_meta"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - dfs-net
+
+
   # entry for host access: localhost:8000 -> meta-entry -> meta-leader
   meta-entry:
     image: nginx:alpine
@@ -28,8 +47,21 @@ services:
       - HEARTBEAT_INTERVAL_SEC=3
       - HEARTBEAT_TIMEOUT_SEC=9
       - MEMBERSHIP_SWEEP_INTERVAL_SEC=1
+      # 0.1p3.1 postgres settings
+      - PG_HOST=postgres
+      - PG_PORT=5432
+      - PG_DATABASE=dfs_meta
+      - PG_USER=dfs_user
+      - PG_PASSWORD=dfs_pass
+      - PG_SSLMODE=disable
+      - PG_CONNECT_TIMEOUT_SEC=5
+      - PG_STATEMENT_TIMEOUT_MS=8000
+      - DEFAULT_NAMESPACE=default
     volumes:
       - ../data/meta:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
     networks:
       - dfs-net
 
@@ -50,8 +82,21 @@ services:
       - HEARTBEAT_INTERVAL_SEC=3
       - HEARTBEAT_TIMEOUT_SEC=9
       - MEMBERSHIP_SWEEP_INTERVAL_SEC=1
+      # 0.1p3.1 postgres settings
+      - PG_HOST=postgres
+      - PG_PORT=5432
+      - PG_DATABASE=dfs_meta
+      - PG_USER=dfs_user
+      - PG_PASSWORD=dfs_pass
+      - PG_SSLMODE=disable
+      - PG_CONNECT_TIMEOUT_SEC=5
+      - PG_STATEMENT_TIMEOUT_MS=8000
+      - DEFAULT_NAMESPACE=default
     volumes:
       - ../data/meta-follower:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
     networks:
       - dfs-net
 
