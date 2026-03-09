@@ -41,5 +41,5 @@ def startup_init_repository() -> None:
 
 
 @app.on_event("shutdown")
-def shutdown_replication_runtimme() -> None:
+def shutdown_replication_runtime() -> None:
     stop_replication_runtime()
