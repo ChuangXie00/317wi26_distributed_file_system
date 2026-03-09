@@ -1,5 +1,5 @@
 import random 
-from typing import Dict, List, Literal
+from typing import Any, Dict, List, Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -11,6 +11,15 @@ from core.config import (
     ROLE,
     STORAGE_NODES
 )
+
+from core.replication import (
+    apply_replicated_state,
+    build_state_snapshot,
+    get_replication_status,
+    push_state_to_followers,
+    record_leader_heartbeat
+)
+
 from core.state import (
     State,
     choose_replicas, 
@@ -27,11 +36,18 @@ from repository import get_repository
 router = APIRouter()
 REPO = get_repository()
 
+
+# 0.1p04里follower是warm-standby，只读不处理写路径
+def _ensure_leader_write_api() -> None:
+    if ROLE != "leader":
+        raise HTTPException(status_code=409, detail="meta follower is read-only in 0.1p04")
+
+
 def _load_state_with_membership_refresh() -> State:
-    # refresh membership timeout info first b4 ecah API call
     # avoid dead storage node to be assignded for chunk
     state = load_state()
-    if refresh_storage_membership(state):
+    # leader负责刷新timeout状态，follower只被动接收同步
+    if ROLE == "leader" and refresh_storage_membership(state):
         persist_state(state)
     return state
 
@@ -101,18 +117,71 @@ class StorageHeartbeatResp(BaseModel):
     node_id: str
     observed_at: str
 
+class LeaderHeartbeatReq(BaseModel):
+    leader_id: str = Field(..., min_length=1)
+    sent_at: str = ""
+
+
+class LeaderHeartbeatResp(BaseModel):
+    status: Literal["alive"]
+    follower_id: str
+    observed_at: str
+
+
+class ReplicateStateReq(BaseModel):
+    source_node_id: str = Field(..., min_length=1)
+    generated_at: str = ""
+    reason: str = "manual"
+    membership: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+
+
+class ReplicateStateResp(BaseModel):
+    status: Literal["synced"]
+    follower_id: str
+    applied_at: str
+
+
+
+
 def _build_chunk_register_resp(nodes: List[str]) -> ChunkRegisterResp:
     # return new and old field at same time for compatibility, will remove assigned_node in future
     unique = _unique_nodes(nodes)
     return ChunkRegisterResp(assigned_nodes=unique, assigned_node=unique)
 
+
 @router.get("/health")
 def health() -> dict:
-    return {"role": "meta", "ok": True}
+    return {"role": "meta", "meta_role": ROLE, "ok": True}
+
+@router.post("/internal/heartbeat", response_model=LeaderHeartbeatResp)
+def internal_heartbeat(req: LeaderHeartbeatReq) -> LeaderHeartbeatResp:
+    if ROLE != "follower":
+        raise HTTPException(status_code=409, detail="only follower accepts leader heartbeat")
+    observed_at = record_leader_heartbeat(req.leader_id)
+    return LeaderHeartbeatResp(status="alive", follower_id=META_NODE_ID, observed_at=observed_at)
+
+
+@router.post("/internal/replicate_state", response_model=ReplicateStateResp)
+def internal_replicate_state(req: ReplicateStateReq) -> ReplicateStateResp:
+    if ROLE != "follower":
+        raise HTTPException(status_code=409, detail="only follower accepts replicated state")
+    result = apply_replicated_state(req.dict())
+    return ReplicateStateResp(status="synced", follower_id=META_NODE_ID, applied_at=str(result["applied_at"]))
+
+
+@router.get("/internal/state_snapshot")
+def internal_state_snapshot() -> dict:
+    if ROLE != "leader":
+        raise HTTPException(status_code=409, detail="only leader serves state snapshot")
+    return build_state_snapshot(reason="manual_snapshot")
+
 
 # 处理storage心跳，加锁完成超时刷新、心跳写入(0.1p3.1)
 @router.post("/internal/storage_heartbeat", response_model=StorageHeartbeatResp)
 def storage_heartbeat(req: StorageHeartbeatReq) -> StorageHeartbeatResp:
+    # 0.1p04里follower是warm-standby，只读不处理写路径
+    _ensure_leader_write_api()
+
     node_id = req.node_id.strip()
     if not node_id:
         raise HTTPException(status_code=400, detail="node_id is required")
@@ -120,7 +189,6 @@ def storage_heartbeat(req: StorageHeartbeatReq) -> StorageHeartbeatResp:
         raise HTTPException(status_code=400, detail=f"unknown storage node: {node_id}")
 
     holder: Dict[str, str] = {"observed_at": ""}
-
 
     def _mutator(state: State) -> bool:
         changed = refresh_storage_membership(state)
@@ -133,6 +201,7 @@ def storage_heartbeat(req: StorageHeartbeatReq) -> StorageHeartbeatResp:
 
     mutate_state(_mutator)
     return StorageHeartbeatResp(status="alive", node_id=node_id, observed_at=holder["observed_at"])
+
 
 # 检查chunk是否存在可用副本(0.1p3.1引入postgre)
 @router.post("/chunk/check", response_model=ChunkCheckResp)
@@ -149,9 +218,13 @@ def chunk_check(req: ChunkCheckReq) -> ChunkCheckResp:
     exists = len(locations) >= REPLICATION_FACTOR
     return ChunkCheckResp(exists=exists, locations=locations)
 
+
 # 注册chunk，有记录则执行按当前存活节点修复副本
 @router.post("/chunk/register", response_model=ChunkRegisterResp)
 def chunk_register(req: ChunkRegisterReq) -> ChunkRegisterResp:
+    # 0.1p04里follower是warm-standby，只读不处理写路径
+    _ensure_leader_write_api()
+
     state = _load_state_with_membership_refresh()
     alive_nodes = get_alive_storage_nodes(state)
 
@@ -170,9 +243,13 @@ def chunk_register(req: ChunkRegisterReq) -> ChunkRegisterResp:
 
     return _build_chunk_register_resp(repaired)
 
+
 # commit文件meta数据到DB，事务内更新file到chunks的映射
 @router.post("/file/commit", response_model=FileCommitResp)
 def file_commit(req: FileCommitReq) -> FileCommitResp:
+    # 0.1p04里follower是warm-standby，只读不处理写路径
+    _ensure_leader_write_api()
+
     state = _load_state_with_membership_refresh()
     alive_nodes = get_alive_storage_nodes(state)
 
@@ -195,7 +272,10 @@ def file_commit(req: FileCommitReq) -> FileCommitResp:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    # commit成功后，触发状态同步push to followers（尝试，但不阻断主链路）
+    push_state_to_followers(reason="file_commit")
     return FileCommitResp(status="ok")
+
 
 # 查询文件分块与可用副本位置(过滤dead)
 @router.get("/file/{file_name}", response_model=FileGetResp)
@@ -215,6 +295,7 @@ def file_get(file_name: str) -> FileGetResp:
 
     return FileGetResp(chunks=out)
 
+
 @router.get("/debug/leader")
 def debug_leader() -> dict:
     leader = META_NODE_ID if ROLE == "leader" else "meta-01"
@@ -224,11 +305,14 @@ def debug_leader() -> dict:
 @router.get("/debug/membership")
 def debug_membership() -> dict:
     state = load_state()
-    changed = refresh_storage_membership(state)
-    snapshot = get_membership_snapshot(state)
+    changed = False
 
-    if changed:
-        persist_state(state)
+    if ROLE == "leader":
+        changed = refresh_storage_membership(state)
+        if changed:
+            persist_state(state)
+
+    snapshot = get_membership_snapshot(state)
 
     alive_count = 0
     dead_count = 0
@@ -251,9 +335,16 @@ def debug_membership() -> dict:
             "dead": dead_count,
             "total": len(snapshot),
         },
+        "refreshed_by_leader": changed if ROLE == "leader" else False,
     }
+
 
 # 检测DB的连通性
 @router.get("/debug/repository")
 def debug_repository() -> dict:
     return REPO.db_health()
+
+
+@router.get("/debug/replication")
+def debug_replication() -> dict:
+    return get_replication_status()

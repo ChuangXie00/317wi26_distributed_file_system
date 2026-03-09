@@ -43,10 +43,19 @@ services:
       - STORAGE_PORT=9009
       - METADATA_FILE=metadata.json
       - DATA_DIR=/data
+
       # 0.1p03 heartbeat and membership timeout settings
       - HEARTBEAT_INTERVAL_SEC=3
       - HEARTBEAT_TIMEOUT_SEC=9
       - MEMBERSHIP_SWEEP_INTERVAL_SEC=1
+
+      # 0.1p04 leader -> follower 同步参数（当前双节点一主一从）
+      - META_FOLLOWER_URLS=http://meta-02:8000
+      - META_INTERNAL_TIMEOUT_SEC=2
+      - META_HEARTBEAT_INTERVAL_SEC=3
+      - META_SYNC_INTERVAL_SEC=5
+      - META_LEADER_HEARTBEAT_TIMEOUT_SEC=9
+
       # 0.1p3.1 postgres settings
       - PG_HOST=postgres
       - PG_PORT=5432
@@ -78,10 +87,19 @@ services:
       - STORAGE_PORT=9009
       - METADATA_FILE=metadata.json
       - DATA_DIR=/data
+
       # 0.1p03 heartbeat and membership timeout settings
       - HEARTBEAT_INTERVAL_SEC=3
       - HEARTBEAT_TIMEOUT_SEC=9
       - MEMBERSHIP_SWEEP_INTERVAL_SEC=1
+
+      # 0.1p04 follower观测leader心跳，不接管（当前双节点一主一从）
+      - META_LEADER_URLS=http://meta-01:8000
+      - META_INTERNAL_TIMEOUT_SEC=2
+      - META_HEARTBEAT_INTERVAL_SEC=3
+      - META_SYNC_INTERVAL_SEC=5
+      - META_LEADER_HEARTBEAT_TIMEOUT_SEC=9
+
       # 0.1p3.1 postgres settings
       - PG_HOST=postgres
       - PG_PORT=5432
@@ -94,6 +112,9 @@ services:
       - DEFAULT_NAMESPACE=default
     volumes:
       - ../data/meta-follower:/data
+    # 0.1p04 暴露8002用于本地测试验证warm standby机制
+    ports:
+      - "8002:8000"
     depends_on:
       postgres:
         condition: service_healthy
