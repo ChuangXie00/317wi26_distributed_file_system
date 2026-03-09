@@ -24,12 +24,12 @@ def startup_init_repository() -> None:
         try:
             init_repository_schema()
             print("[meta] repository schema initialized.")
-            return
+            break
         except Exception as exc:
             print(f"[meta] repository init failed (attempt={attempt}/{max_retries}): {exc}")
             time.sleep(sleep_sec)
-
-    raise RuntimeError("failed to initialize postgres repository schema after retries")
+    else:
+        raise RuntimeError("failed to initialize postgres repository schema after retries")
 
     # init membership
     start_replication_runtime()
