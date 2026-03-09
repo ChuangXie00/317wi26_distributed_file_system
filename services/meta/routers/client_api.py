@@ -4,7 +4,14 @@ from typing import Dict, List, Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from core.config import META_NODE_ID, REPLICATION_FACTOR, ROLE, STORAGE_NODES
+from core.config import (
+    HEARTBEAT_WRITE_MIN_INTERVAL_SEC,
+    META_NODE_ID,
+    REPLICATION_FACTOR,
+    ROLE,
+    STORAGE_NODES
+)
+from core.repository_pg import get_repository
 from core.state import (
     State,
     choose_replicas, 
@@ -12,11 +19,13 @@ from core.state import (
     get_membership_snapshot,
     load_state, 
     mark_storage_heartbeat,
+    mutate_state,
     persist_state,
     refresh_storage_membership,
 )
 
 router = APIRouter()
+REPO = get_repository()
 
 def _load_state_with_membership_refresh() -> State:
     # refresh membership timeout info first b4 ecah API call
@@ -26,28 +35,30 @@ def _load_state_with_membership_refresh() -> State:
         persist_state(state)
     return state
 
-
+# dedup node list and preserve original order
 def _unique_nodes(nodes: List[str]) -> List[str]:
     out: List[str] = []
     seen = set()
     for node in nodes:
-        if node and node not in seen:
-            seen.add(node)
-            out.append(node)
+        value = str(node).strip()
+        if value and value not in seen:
+            seen.add(value)
+            out.append(value)
     return out
 
+# 修复副本列表，去除dead节点，补齐副本数
 def _repair_chunk_replicas(current_replicas: List[str], alive_nodes: List[str]) -> List[str]:
     current = [node for node in _unique_nodes(current_replicas) if node in alive_nodes]
 
     if len(current) >= REPLICATION_FACTOR:
         return current[:REPLICATION_FACTOR]
-    
+
     needed = REPLICATION_FACTOR - len(current)
     candidates = [node for node in alive_nodes if node not in current]
 
     if len(candidates) < needed:
         raise HTTPException(status_code=500, detail="not enough replicas available")
-    
+
     return current + random.sample(candidates, needed)
 
 class ChunkCheckReq(BaseModel):
@@ -99,6 +110,7 @@ def _build_chunk_register_resp(nodes: List[str]) -> ChunkRegisterResp:
 def health() -> dict:
     return {"role": "meta", "ok": True}
 
+# 处理storage心跳，加锁完成超时刷新、心跳写入(0.1p3.1)
 @router.post("/internal/storage_heartbeat", response_model=StorageHeartbeatResp)
 def storage_heartbeat(req: StorageHeartbeatReq) -> StorageHeartbeatResp:
     node_id = req.node_id.strip()
@@ -107,104 +119,97 @@ def storage_heartbeat(req: StorageHeartbeatReq) -> StorageHeartbeatResp:
     if node_id not in STORAGE_NODES:
         raise HTTPException(status_code=400, detail=f"unknown storage node: {node_id}")
 
-    state = load_state()
-
-    # 先刷新超时状态，再写入当前心跳，保证状态演进顺序可解释
-    changed = refresh_storage_membership(state)
-    if mark_storage_heartbeat(state, node_id):
-        changed = True
-
-    if changed:
-        persist_state(state)
-
-    snapshot = get_membership_snapshot(state)
-    observed_at = str(snapshot.get(node_id, {}).get("last_heartbeat_at", ""))
-    return StorageHeartbeatResp(status="alive", node_id=node_id, observed_at=observed_at)
+    holder: Dict[str, str] = {"observed_at": ""}
 
 
+    def _mutator(state: State) -> bool:
+        changed = refresh_storage_membership(state)
+        if mark_storage_heartbeat(state, node_id, min_interval_sec=HEARTBEAT_WRITE_MIN_INTERVAL_SEC):
+            changed = True
+
+        snapshot = get_membership_snapshot(state)
+        holder["observed_at"] = str(snapshot.get(node_id, {}).get("last_heartbeat_at", ""))
+        return changed
+
+    mutate_state(_mutator)
+    return StorageHeartbeatResp(status="alive", node_id=node_id, observed_at=holder["observed_at"])
+
+# 检查chunk是否存在可用副本(0.1p3.1引入postgre)
 @router.post("/chunk/check", response_model=ChunkCheckResp)
 def chunk_check(req: ChunkCheckReq) -> ChunkCheckResp:
     state = _load_state_with_membership_refresh()
-    chunk_info = state.get("chunks", {}).get(req.fingerprint)
-    if not chunk_info:
+    replicas = _unique_nodes(REPO.get_chunk_replicas(req.fingerprint))
+    if not replicas:
         return ChunkCheckResp(exists=False, locations=[])
 
-    replicas = _unique_nodes(chunk_info.get("replicas", []))
     alive_set = set(get_alive_storage_nodes(state))
-    replicas = [node for node in replicas if node in alive_set]
+    locations = [node for node in replicas if node in alive_set]
 
     # only replicas larger than or equal to REPLICATION_FACTOR is considered exists
-    exists = len(replicas) >= REPLICATION_FACTOR
-    return ChunkCheckResp(exists=exists, locations=replicas)
+    exists = len(locations) >= REPLICATION_FACTOR
+    return ChunkCheckResp(exists=exists, locations=locations)
 
+# 注册chunk，有记录则执行按当前存活节点修复副本
 @router.post("/chunk/register", response_model=ChunkRegisterResp)
 def chunk_register(req: ChunkRegisterReq) -> ChunkRegisterResp:
     state = _load_state_with_membership_refresh()
-    chunks = state.setdefault("chunks", {})
     alive_nodes = get_alive_storage_nodes(state)
 
     if len(alive_nodes) < REPLICATION_FACTOR:
         raise HTTPException(status_code=500, detail="not enough replicas(storage nodes) available")
 
-    chunk_info = chunks.get(req.fingerprint)
-    if not chunk_info:
+    current = _unique_nodes(REPO.get_chunk_replicas(req.fingerprint))
+    if not current:
         assigned = choose_replicas(alive_nodes, REPLICATION_FACTOR)
-        chunks[req.fingerprint] = {"replicas": assigned}
-        persist_state(state)
+        REPO.upsert_chunk_replicas(req.fingerprint, assigned)
         return _build_chunk_register_resp(assigned)
-    
-    # for existing chunk, if the current replicas are less than REPLICATION_FACTOR
-    # repair it by assign new replicas, and update metadata
-    current_replicas = chunk_info.get("replicas", [])
-    repaired = _repair_chunk_replicas(current_replicas, alive_nodes)
-    if repaired != _unique_nodes(current_replicas):
-        chunks[req.fingerprint]["replicas"] = repaired
-        persist_state(state)
+
+    repaired = _repair_chunk_replicas(current, alive_nodes)
+    if repaired != current:
+        REPO.upsert_chunk_replicas(req.fingerprint, repaired)
 
     return _build_chunk_register_resp(repaired)
 
-
+# commit文件meta数据到DB，事务内更新file到chunks的映射
 @router.post("/file/commit", response_model=FileCommitResp)
 def file_commit(req: FileCommitReq) -> FileCommitResp:
     state = _load_state_with_membership_refresh()
-    files = state.setdefault("files", {})
-    chunks = state.setdefault("chunks", {})
-
-    missing = [fp for fp in req.chunks if fp not in chunks]
-    if missing:
-        raise HTTPException(status_code=400, detail=f"chunks not registered: {missing}")
-
     alive_nodes = get_alive_storage_nodes(state)
+
     if len(alive_nodes) < REPLICATION_FACTOR:
         raise HTTPException(status_code=500, detail="not enough replicas(storage nodes) available")
 
-    # repair replicas b4 commit
-    # ensure metadata doesn't point to dead nodes
-    for fp in set(req.chunks):
-        current_replicas = chunks.get(fp, {}).get("replicas", [])
-        repaired = _repair_chunk_replicas(current_replicas, alive_nodes)
-        chunks[fp] = {"replicas": repaired}
+    missing = REPO.list_missing_chunks(req.chunks)
+    if missing:
+        raise HTTPException(status_code=400, detail=f"chunks not registered: {missing}")
 
-    files[req.file_name] = {"chunks": req.chunks}
-    persist_state(state)
+    # 在写文件映射前，先修复所有涉及chunk的副本
+    for fp in set(req.chunks):
+        current = _unique_nodes(REPO.get_chunk_replicas(fp))
+        repaired = _repair_chunk_replicas(current, alive_nodes)
+        if repaired != current:
+            REPO.upsert_chunk_replicas(fp, repaired)
+
+    try:
+        REPO.upsert_file(req.file_name, req.chunks)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     return FileCommitResp(status="ok")
 
-
+# 查询文件分块与可用副本位置(过滤dead)
 @router.get("/file/{file_name}", response_model=FileGetResp)
 def file_get(file_name: str) -> FileGetResp:
     state = _load_state_with_membership_refresh()
-    files = state.get("files", {})
-    chunks = state.get("chunks", {})
     alive_set = set(get_alive_storage_nodes(state))
 
-    if file_name not in files:
+    chunk_fps = REPO.get_file_chunks(file_name)
+    if chunk_fps is None:
         raise HTTPException(status_code=404, detail="file not found")
 
     out: List[FileGetItem] = []
-    for fp in files[file_name].get("chunks", []):
-        # when download file, only return alive nodes
-        # reduce unneccessary retry to dead nodes on client side
-        replicas = _unique_nodes(chunks.get(fp, {}).get("replicas", []))
+    for fp in chunk_fps:
+        replicas = _unique_nodes(REPO.get_chunk_replicas(fp))
         locations = [node for node in replicas if node in alive_set]
         out.append(FileGetItem(fingerprint=fp, locations=locations))
 
@@ -247,3 +252,8 @@ def debug_membership() -> dict:
             "total": len(snapshot),
         },
     }
+
+# 检测DB的连通性
+@router.get("/debug/repository")
+def debug_repository() -> dict:
+    return REPO.db_health()
