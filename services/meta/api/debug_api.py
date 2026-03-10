@@ -1,7 +1,7 @@
 from fastapi import APIRouter
 
-from core.config import META_NODE_ID, ROLE
 from core.replication import get_replication_status
+from core.runtime import get_runtime_snapshot, is_writable_leader
 from core.state import get_membership_snapshot, load_state, persist_state, refresh_storage_membership
 from repository import get_repository
 
@@ -11,18 +11,29 @@ REPO = get_repository()
 
 @router.get("/debug/leader")
 def debug_leader() -> dict:
-    leader = META_NODE_ID if ROLE == "leader" else "meta-01"
-    return {"leader": leader}
+    # 中文：输出运行时 leader 视图，替代旧版静态 ROLE 观测。
+    runtime = get_runtime_snapshot()
+    return {
+        "node_id": runtime.get("node_id"),
+        "role": runtime.get("role"),
+        "leader": runtime.get("current_leader_id"),
+        "leader_epoch": runtime.get("leader_epoch"),
+        "lamport": runtime.get("lamport_clock"),
+        "last_applied_lamport": runtime.get("last_applied_lamport"),
+        "writable_leader": is_writable_leader(),
+        "election_mode": runtime.get("election_mode"),
+    }
 
 
 @router.get("/debug/membership")
 def debug_membership() -> dict:
     state = load_state()
-    changed = False
+    refreshed = False
 
-    if ROLE == "leader":
-        changed = refresh_storage_membership(state)
-        if changed:
+    # 中文：仅可写 leader 主动刷新超时，保证 debug 输出反映最新 membership。
+    if is_writable_leader():
+        refreshed = refresh_storage_membership(state)
+        if refreshed:
             persist_state(state)
 
     snapshot = get_membership_snapshot(state)
@@ -47,16 +58,18 @@ def debug_membership() -> dict:
             "dead": dead_count,
             "total": len(snapshot),
         },
-        "refreshed_by_leader": changed if ROLE == "leader" else False,
+        "runtime": get_runtime_snapshot(),
+        "refreshed_by_writable_leader": refreshed,
     }
 
 
 @router.get("/debug/repository")
 def debug_repository() -> dict:
+    # 中文：用于快速观测 PostgreSQL 表健康和数据规模。
     return REPO.db_health()
 
 
 @router.get("/debug/replication")
 def debug_replication() -> dict:
+    # 中文：输出复制、心跳、接管、Lamport 的完整运行时信息。
     return get_replication_status()
-

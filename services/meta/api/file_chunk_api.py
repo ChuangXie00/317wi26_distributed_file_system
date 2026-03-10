@@ -3,8 +3,9 @@ from typing import List
 
 from fastapi import APIRouter, HTTPException
 
-from core.config import REPLICATION_FACTOR, ROLE
+from core.config import REPLICATION_FACTOR
 from core.replication import push_state_to_followers
+from core.runtime import get_runtime_snapshot, is_writable_leader, tick_lamport
 from core.state import (
     State,
     choose_replicas,
@@ -31,15 +32,24 @@ REPO = get_repository()
 
 
 def _ensure_leader_write_api() -> None:
-    # 0.1p04 follower 是 warm-standby，只读不处理写路径
-    if ROLE != "leader":
-        raise HTTPException(status_code=409, detail="meta follower is read-only in 0.1p04")
+    # 中文：Phase5 写门禁（fencing）；只有“我就是当前 leader”时才允许写。
+    if not is_writable_leader():
+        runtime = get_runtime_snapshot()
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "node is not writable leader: "
+                f"role={runtime.get('role')}, "
+                f"leader={runtime.get('current_leader_id')}, "
+                f"epoch={runtime.get('leader_epoch')}"
+            ),
+        )
 
 
 def _load_state_with_membership_refresh() -> State:
     state = load_state()
-    # leader 负责刷新 timeout 状态；follower 只被动接收同步
-    if ROLE == "leader" and refresh_storage_membership(state):
+    # 中文：仅可写 leader 主动刷新 membership 超时；follower 被动接收同步。
+    if is_writable_leader() and refresh_storage_membership(state):
         persist_state(state)
     return state
 
@@ -77,7 +87,14 @@ def _build_chunk_register_resp(nodes: List[str]) -> ChunkRegisterResp:
 
 @router.get("/health")
 def health() -> dict:
-    return {"role": "meta", "meta_role": ROLE, "ok": True}
+    runtime = get_runtime_snapshot()
+    return {
+        "role": "meta",
+        "meta_role": runtime.get("role"),
+        "current_leader_id": runtime.get("current_leader_id"),
+        "leader_epoch": runtime.get("leader_epoch"),
+        "ok": True,
+    }
 
 
 @router.post("/chunk/check", response_model=ChunkCheckResp)
@@ -98,6 +115,8 @@ def chunk_check(req: ChunkCheckReq) -> ChunkCheckResp:
 @router.post("/chunk/register", response_model=ChunkRegisterResp)
 def chunk_register(req: ChunkRegisterReq) -> ChunkRegisterResp:
     _ensure_leader_write_api()
+    # 中文：写事件推进 Lamport，便于 debug 追踪时序。
+    tick_lamport(event="chunk_register")
 
     state = _load_state_with_membership_refresh()
     alive_nodes = get_alive_storage_nodes(state)
@@ -119,6 +138,8 @@ def chunk_register(req: ChunkRegisterReq) -> ChunkRegisterResp:
 @router.post("/file/commit", response_model=FileCommitResp)
 def file_commit(req: FileCommitReq) -> FileCommitResp:
     _ensure_leader_write_api()
+    # 中文：commit 是主链路关键事件，必须推进 Lamport。
+    tick_lamport(event="file_commit")
 
     state = _load_state_with_membership_refresh()
     alive_nodes = get_alive_storage_nodes(state)

@@ -35,8 +35,13 @@ services:
     build: ../services/meta
     container_name: meta-01
     environment:
-      - NODE_ID=meta-01
+      # 0.1p5.0：运行时角色 bootstrap，后续由 election/coordinator 动态收敛。
+      - META_NODE_ID=meta-01
       - META_ROLE=leader
+      # 0.1p5.0：统一选主配置（本阶段仅支持 bully，非 bully 启动即失败）。
+      - LEADER_ELECTION_MODE=bully
+      - META_CLUSTER_NODES=meta-01,meta-02
+      - META_INTERNAL_PORT=8000
       - REPLICATION_FACTOR=2
       - STORAGE_NODES=storage-01, storage-02, storage-03
       - ENABLE_STORAGE_HEALTHCHECK=1
@@ -49,7 +54,7 @@ services:
       - HEARTBEAT_TIMEOUT_SEC=9
       - MEMBERSHIP_SWEEP_INTERVAL_SEC=1
 
-      # 0.1p04 leader -> follower 同步参数（当前双节点一主一从）
+      # 0.1p04 历史兼容：leader -> follower 同步参数（p5 主路径改为 cluster peers）
       - META_FOLLOWER_URLS=http://meta-02:8000
       - META_INTERNAL_TIMEOUT_SEC=2
       - META_HEARTBEAT_INTERVAL_SEC=3
@@ -74,13 +79,17 @@ services:
     networks:
       - dfs-net
 
-  # 0.1p03 haven't enabled follower sync/taking control, meta-02 is only a container
+  # 0.1p5.0：meta-02 可在 leader 超时后触发 Bully takeover。
   meta-02:
     build: ../services/meta
     container_name: meta-02
     environment:
       - META_NODE_ID=meta-02
       - META_ROLE=follower
+      # 0.1p5.0：统一选主配置（本阶段仅支持 bully，非 bully 启动即失败）。
+      - LEADER_ELECTION_MODE=bully
+      - META_CLUSTER_NODES=meta-01,meta-02
+      - META_INTERNAL_PORT=8000
       - REPLICATION_FACTOR=2
       - STORAGE_NODES=storage-01,storage-02,storage-03
       - ENABLE_STORAGE_HEALTHCHECK=1
@@ -93,7 +102,7 @@ services:
       - HEARTBEAT_TIMEOUT_SEC=9
       - MEMBERSHIP_SWEEP_INTERVAL_SEC=1
 
-      # 0.1p04 follower观测leader心跳，不接管（当前双节点一主一从）
+      # 0.1p04 历史兼容：follower 观测 leader 地址（p5 主路径改为 cluster peers）
       - META_LEADER_URL=http://meta-01:8000
       - META_INTERNAL_TIMEOUT_SEC=2
       - META_HEARTBEAT_INTERVAL_SEC=3
