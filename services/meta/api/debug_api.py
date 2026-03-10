@@ -11,7 +11,7 @@ REPO = get_repository()
 
 @router.get("/debug/leader")
 def debug_leader() -> dict:
-    # 中文：输出运行时 leader 视图，替代旧版静态 ROLE 观测。
+    # 输出运行时 leader 视图，替代旧版静态 ROLE 观测。
     runtime = get_runtime_snapshot()
     return {
         "node_id": runtime.get("node_id"),
@@ -30,7 +30,7 @@ def debug_membership() -> dict:
     state = load_state()
     refreshed = False
 
-    # 中文：仅可写 leader 主动刷新超时，保证 debug 输出反映最新 membership。
+    # 仅可写 leader 主动刷新超时，保证 debug 输出反映最新 membership。
     if is_writable_leader():
         refreshed = refresh_storage_membership(state)
         if refreshed:
@@ -65,11 +65,11 @@ def debug_membership() -> dict:
 
 @router.get("/debug/repository")
 def debug_repository() -> dict:
-    # 中文：用于快速观测 PostgreSQL 表健康和数据规模。
+    # 用于快速观测 PostgreSQL 表健康和数据规模。
     return REPO.db_health()
 
 
 @router.get("/debug/replication")
 def debug_replication() -> dict:
-    # 中文：输出复制、心跳、接管、Lamport 的完整运行时信息。
+    # 输出复制、心跳、接管、Lamport 的完整运行时信息。
     return get_replication_status()

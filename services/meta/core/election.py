@@ -22,7 +22,7 @@ from .runtime import (
 )
 
 
-# 中文：统一 HTTP JSON POST 工具，供 election/coordinator 内部通信复用。
+# 统一 HTTP JSON POST 工具，供 election/coordinator 内部通信复用。
 def _post_json(url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     body = json.dumps(payload).encode("utf-8")
     req = UrlRequest(url, data=body, method="POST", headers={"Content-Type": "application/json"})
@@ -35,19 +35,19 @@ def _post_json(url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         return json.loads(raw.decode("utf-8"))
 
 
-# 中文：选主策略抽象接口；Phase 5.0 当前仅实现 Bully。
+# 选主策略抽象接口；Phase 5.0 当前仅实现 Bully。
 class ElectionStrategy(Protocol):
     def trigger_election(self, reason: str) -> Dict[str, Any]:
         ...
 
 
-# 中文：Bully 策略实现（按 node_id 字典序比较优先级）。
+# Bully 策略实现（按 node_id 字典序比较优先级）。
 class BullyElectionStrategy:
     def trigger_election(self, reason: str) -> Dict[str, Any]:
         round_info = begin_election_round(reason=reason)
         candidate_epoch = int(round_info["epoch"])
 
-        # 中文：Bully 只向“优先级更高”的节点发 election 请求。
+        # Bully 只向“优先级更高”的节点发 election 请求。
         higher_nodes = [node_id for node_id in get_meta_peer_nodes() if node_id > META_NODE_ID]
         ok_nodes: List[str] = []
         failed_nodes: List[Dict[str, str]] = []
@@ -78,7 +78,7 @@ class BullyElectionStrategy:
                 "failed_nodes": failed_nodes,
             }
 
-        # 中文：没有更高优先级节点存活，则当前 candidate 直接晋升为 leader。
+        # 没有更高优先级节点存活，则当前 candidate 直接晋升为 leader。
         promote_info = promote_self_to_leader(epoch=candidate_epoch, reason=f"bully_win:{reason}")
         coordinator_lamport = tick_lamport(event="send_coordinator")
         broadcast_result = broadcast_coordinator(
@@ -96,20 +96,20 @@ class BullyElectionStrategy:
         }
 
 
-# 中文：根据配置获取选主策略实例；当前仅支持 bully。
+# 根据配置获取选主策略实例；当前仅支持 bully。
 def get_election_strategy() -> ElectionStrategy:
     if LEADER_ELECTION_MODE == "bully":
         return BullyElectionStrategy()
     raise RuntimeError(f"unsupported LEADER_ELECTION_MODE={LEADER_ELECTION_MODE!r}")
 
 
-# 中文：对外统一入口，触发一次选主流程。
+# 对外统一入口，触发一次选主流程。
 def trigger_election(reason: str) -> Dict[str, Any]:
     strategy = get_election_strategy()
     return strategy.trigger_election(reason=reason)
 
 
-# 中文：广播 coordinator 消息，让其他节点更新 leader 视图并执行降级。
+# 广播 coordinator 消息，让其他节点更新 leader 视图并执行降级。
 def broadcast_coordinator(leader_id: str, leader_epoch: int, lamport: int, reason: str) -> Dict[str, Any]:
     ok_nodes: List[str] = []
     failed_nodes: List[Dict[str, str]] = []
@@ -132,7 +132,7 @@ def broadcast_coordinator(leader_id: str, leader_epoch: int, lamport: int, reaso
     return {"attempted": len(get_meta_peer_nodes()), "ok_nodes": ok_nodes, "failed_nodes": failed_nodes}
 
 
-# 中文：处理收到的 election 请求；返回 ok 与是否建议本节点启动本地 election。
+# 处理收到的 election 请求；返回 ok 与是否建议本节点启动本地 election。
 def handle_incoming_election(candidate_id: str, candidate_epoch: int, lamport: int, reason: str) -> Dict[str, Any]:
     normalized_candidate_id = str(candidate_id).strip()
     normalized_epoch = max(0, int(candidate_epoch))
@@ -142,7 +142,7 @@ def handle_incoming_election(candidate_id: str, candidate_epoch: int, lamport: i
 
     stale = normalized_epoch < before_epoch
     if not stale:
-        # 中文：收到更高 epoch 的 candidate 时，先更新本地 epoch 并降级为 follower（fencing）。
+        # 收到更高 epoch 的 candidate 时，先更新本地 epoch 并降级为 follower（fencing）。
         observe_candidate_epoch(candidate_epoch=normalized_epoch, reason=f"incoming_election:{reason}")
 
     local_role = get_node_role()
@@ -164,7 +164,7 @@ def handle_incoming_election(candidate_id: str, candidate_epoch: int, lamport: i
     }
 
 
-# 中文：处理收到的 coordinator 消息；根据 epoch 执行 leader 视图更新与强制降级。
+# 处理收到的 coordinator 消息；根据 epoch 执行 leader 视图更新与强制降级。
 def handle_incoming_coordinator(leader_id: str, leader_epoch: int, lamport: int, reason: str) -> Dict[str, Any]:
     tick_lamport(event="recv_coordinator", incoming_lamport=int(lamport))
     observe_result = observe_leader(

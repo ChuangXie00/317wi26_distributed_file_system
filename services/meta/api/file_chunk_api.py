@@ -32,7 +32,7 @@ REPO = get_repository()
 
 
 def _ensure_leader_write_api() -> None:
-    # 中文：Phase5 写门禁（fencing）；只有“我就是当前 leader”时才允许写。
+    # Phase5 写门禁（fencing）；只有“我就是当前 leader”时才允许写。
     if not is_writable_leader():
         runtime = get_runtime_snapshot()
         raise HTTPException(
@@ -48,7 +48,7 @@ def _ensure_leader_write_api() -> None:
 
 def _load_state_with_membership_refresh() -> State:
     state = load_state()
-    # 中文：仅可写 leader 主动刷新 membership 超时；follower 被动接收同步。
+    # 仅可写 leader 主动刷新 membership 超时；follower 被动接收同步。
     if is_writable_leader() and refresh_storage_membership(state):
         persist_state(state)
     return state
@@ -115,7 +115,7 @@ def chunk_check(req: ChunkCheckReq) -> ChunkCheckResp:
 @router.post("/chunk/register", response_model=ChunkRegisterResp)
 def chunk_register(req: ChunkRegisterReq) -> ChunkRegisterResp:
     _ensure_leader_write_api()
-    # 中文：写事件推进 Lamport，便于 debug 追踪时序。
+    # 写事件推进 Lamport，便于 debug 追踪时序。
     tick_lamport(event="chunk_register")
 
     state = _load_state_with_membership_refresh()
@@ -138,7 +138,7 @@ def chunk_register(req: ChunkRegisterReq) -> ChunkRegisterResp:
 @router.post("/file/commit", response_model=FileCommitResp)
 def file_commit(req: FileCommitReq) -> FileCommitResp:
     _ensure_leader_write_api()
-    # 中文：commit 是主链路关键事件，必须推进 Lamport。
+    # commit 是主链路关键事件，必须推进 Lamport。
     tick_lamport(event="file_commit")
 
     state = _load_state_with_membership_refresh()

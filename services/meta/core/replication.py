@@ -40,17 +40,17 @@ from .state import (
 )
 
 
-# 中文：复制运行时锁，保护 debug 状态字典与线程句柄。
+# 复制运行时锁，保护 debug 状态字典与线程句柄。
 _RUNTIME_LOCK = threading.RLock()
-# 中文：主循环停止信号。
+# 主循环停止信号。
 _STOP_EVENT = threading.Event()
-# 中文：复制/接管统一后台线程句柄。
+# 复制/接管统一后台线程句柄。
 _RUNTIME_THREAD: Optional[threading.Thread] = None
-# 中文：选主互斥锁，避免并发触发多轮 election。
+# 选主互斥锁，避免并发触发多轮 election。
 _ELECTION_LOCK = threading.Lock()
 
 
-# 中文：保存复制、心跳、接管过程中的观测数据，供 /debug/replication 查询。
+# 保存复制、心跳、接管过程中的观测数据，供 /debug/replication 查询。
 _RUNTIME: Dict[str, Any] = {
     "started_ts": time.time(),
     "last_heartbeat_sent_at": "",
@@ -77,23 +77,23 @@ _RUNTIME: Dict[str, Any] = {
 }
 
 
-# 中文：统一 UTC 时间格式，便于日志和 debug 输出对齐。
+# 统一 UTC 时间格式，便于日志和 debug 输出对齐。
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-# 中文：更新复制运行时状态字段。
+# 更新复制运行时状态字段。
 def _update_runtime(**fields: Any) -> None:
     with _RUNTIME_LOCK:
         _RUNTIME.update(fields)
 
 
-# 中文：记录运行异常，避免静默失败。
+# 记录运行异常，避免静默失败。
 def _record_error(msg: str) -> None:
     _update_runtime(last_error=str(msg), last_error_at=_now_iso())
 
 
-# 中文：内部 HTTP JSON POST 工具，供 heartbeat/replicate/election 使用。
+# 内部 HTTP JSON POST 工具，供 heartbeat/replicate/election 使用。
 def _post_json(url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     body = json.dumps(payload).encode("utf-8")
     req = UrlRequest(url, data=body, method="POST", headers={"Content-Type": "application/json"})
@@ -109,7 +109,7 @@ def _post_json(url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
             return {}
 
 
-# 中文：组合 peer URL，优先 cluster 配置，并兼容旧版 META_FOLLOWER_URLS。
+# 组合 peer URL，优先 cluster 配置，并兼容旧版 META_FOLLOWER_URLS。
 def _peer_urls() -> List[str]:
     urls: List[str] = []
     seen = set()
@@ -129,7 +129,7 @@ def _peer_urls() -> List[str]:
     return urls
 
 
-# 中文：清洗复制消息中的 membership 结构，兼容旧格式。
+# 清洗复制消息中的 membership 结构，兼容旧格式。
 def _sanitize_membership(raw_membership: Any) -> Dict[str, Dict[str, Any]]:
     if not isinstance(raw_membership, dict):
         raise ValueError("membership must be an object")
@@ -143,12 +143,12 @@ def _sanitize_membership(raw_membership: Any) -> Dict[str, Dict[str, Any]]:
         if isinstance(entry, dict):
             out[node_key] = copy.deepcopy(entry)
         else:
-            # 中文：兼容旧数据（value 可能是纯状态字符串）。
+            # 兼容旧数据（value 可能是纯状态字符串）。
             out[node_key] = {"status": str(entry)}
     return out
 
 
-# 中文：构造状态快照（仅同步 membership；files/chunks 由 PostgreSQL 承载）。
+# 构造状态快照（仅同步 membership；files/chunks 由 PostgreSQL 承载）。
 def build_state_snapshot(reason: str = "manual") -> Dict[str, Any]:
     state = load_state()
     if is_writable_leader() and refresh_storage_membership(state):
@@ -166,7 +166,7 @@ def build_state_snapshot(reason: str = "manual") -> Dict[str, Any]:
     }
 
 
-# 中文：leader 向 peers 推送 replicate_state；失败只记录，不阻断主链路。
+# leader 向 peers 推送 replicate_state；失败只记录，不阻断主链路。
 def push_state_to_followers(reason: str = "manual") -> Dict[str, Any]:
     if not is_writable_leader():
         return {"status": "skipped", "reason": "node is not writable leader", "attempted": 0, "succeeded": 0, "failed": []}
@@ -199,7 +199,7 @@ def push_state_to_followers(reason: str = "manual") -> Dict[str, Any]:
     }
 
 
-# 中文：记录 leader 心跳并按 epoch 执行降级（fencing）。
+# 记录 leader 心跳并按 epoch 执行降级（fencing）。
 def record_leader_heartbeat(leader_id: str, leader_epoch: int, lamport: int) -> Dict[str, Any]:
     observed_at = _now_iso()
     tick_lamport(event="recv_leader_heartbeat", incoming_lamport=max(0, int(lamport)))
@@ -209,7 +209,7 @@ def record_leader_heartbeat(leader_id: str, leader_epoch: int, lamport: int) -> 
         reason="leader_heartbeat",
     )
 
-    # 中文：只有“未被忽略”的心跳才刷新超时计时器，避免旧 epoch 心跳干扰 takeover。
+    # 只有“未被忽略”的心跳才刷新超时计时器，避免旧 epoch 心跳干扰 takeover。
     if not bool(observe_result.get("ignored", False)):
         _update_runtime(
             last_leader_heartbeat_at=observed_at,
@@ -228,7 +228,7 @@ def record_leader_heartbeat(leader_id: str, leader_epoch: int, lamport: int) -> 
     }
 
 
-# 中文：应用 leader 下发的复制状态，并基于 Lamport 拒绝旧消息覆盖新状态。
+# 应用 leader 下发的复制状态，并基于 Lamport 拒绝旧消息覆盖新状态。
 def apply_replicated_state(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     source_node_id = str(snapshot.get("source_node_id", "")).strip() or "unknown"
     leader_id = str(snapshot.get("leader_id", source_node_id)).strip() or source_node_id
@@ -269,7 +269,7 @@ def apply_replicated_state(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         current = state.get("membership", {})
         if current == membership:
             return False
-        # 中文：follower 直接应用 leader 快照，保持 warm standby。
+        # follower 直接应用 leader 快照，保持 warm standby。
         state["membership"] = copy.deepcopy(membership)
         changed_holder["changed"] = True
         return True
@@ -293,7 +293,7 @@ def apply_replicated_state(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-# 中文：leader 定期向 peers 发送 heartbeat，附带 leader_epoch 与 Lamport。
+# leader 定期向 peers 发送 heartbeat，附带 leader_epoch 与 Lamport。
 def _send_heartbeat_to_peers() -> None:
     if not is_writable_leader():
         return
@@ -315,7 +315,7 @@ def _send_heartbeat_to_peers() -> None:
         try:
             resp = _post_json(f"{peer_base}/internal/heartbeat", payload)
             tick_lamport(event="recv_heartbeat_ack", incoming_lamport=int(resp.get("lamport", 0)))
-            # 中文：利用 heartbeat ack 做反向 fencing 校验，发现更高 epoch 立刻降级。
+            # 利用 heartbeat ack 做反向 fencing 校验，发现更高 epoch 立刻降级。
             ack_leader_id = str(resp.get("current_leader_id", "")).strip()
             ack_leader_epoch = max(0, int(resp.get("leader_epoch", 0)))
             if ack_leader_id and ack_leader_id != META_NODE_ID:
@@ -329,7 +329,7 @@ def _send_heartbeat_to_peers() -> None:
             _record_error(f"leader heartbeat failed to {peer_base}: {exc}")
 
 
-# 中文：执行一次 takeover 流程（超时触发或内部预抢占触发）。
+# 执行一次 takeover 流程（超时触发或内部预抢占触发）。
 def trigger_takeover(reason: str) -> Dict[str, Any]:
     acquired = _ELECTION_LOCK.acquire(blocking=False)
     if not acquired:
@@ -349,7 +349,7 @@ def trigger_takeover(reason: str) -> Dict[str, Any]:
             last_takeover_detail=copy.deepcopy(result),
         )
 
-        # 中文：当选后立即推送一次状态，尽快收敛 follower 视图。
+        # 当选后立即推送一次状态，尽快收敛 follower 视图。
         if is_writable_leader():
             push_state_to_followers(reason="takeover_elected")
         return result
@@ -361,7 +361,7 @@ def trigger_takeover(reason: str) -> Dict[str, Any]:
         _ELECTION_LOCK.release()
 
 
-# 中文：异步触发 takeover，避免在 API 线程内阻塞。
+# 异步触发 takeover，避免在 API 线程内阻塞。
 def trigger_takeover_async(reason: str) -> None:
     def _runner() -> None:
         trigger_takeover(reason=reason)
@@ -370,7 +370,7 @@ def trigger_takeover_async(reason: str) -> None:
     thread.start()
 
 
-# 中文：follower/candidate 周期检查 leader 心跳超时，超时后触发 election。
+# follower/candidate 周期检查 leader 心跳超时，超时后触发 election。
 def _maybe_takeover_by_timeout() -> None:
     runtime_snapshot = get_runtime_snapshot()
     role = str(runtime_snapshot.get("role", "follower"))
@@ -387,14 +387,14 @@ def _maybe_takeover_by_timeout() -> None:
     if elapsed <= META_LEADER_HEARTBEAT_TIMEOUT_SEC:
         return
 
-    # 中文：简单冷却窗口，避免连续 timeout 触发过于频繁。
+    # 简单冷却窗口，避免连续 timeout 触发过于频繁。
     if last_takeover_ts > 0 and (time.time() - last_takeover_ts) < 1.5:
         return
 
     trigger_takeover(reason=f"leader_timeout_{round(elapsed, 3)}s")
 
 
-# 中文：统一后台循环：leader 负责发送 heartbeat+sync；follower 负责超时接管。
+# 统一后台循环：leader 负责发送 heartbeat+sync；follower 负责超时接管。
 def _replication_runtime_loop() -> None:
     hb_interval = max(0.5, float(META_HEARTBEAT_INTERVAL_SEC))
     sync_interval = max(hb_interval, float(META_SYNC_INTERVAL_SEC))
@@ -413,7 +413,7 @@ def _replication_runtime_loop() -> None:
         _STOP_EVENT.wait(hb_interval)
 
 
-# 中文：启动复制/接管运行时线程。
+# 启动复制/接管运行时线程。
 def start_replication_runtime() -> None:
     global _RUNTIME_THREAD
     with _RUNTIME_LOCK:
@@ -425,7 +425,7 @@ def start_replication_runtime() -> None:
         _RUNTIME_THREAD.start()
 
 
-# 中文：停止复制/接管运行时线程。
+# 停止复制/接管运行时线程。
 def stop_replication_runtime() -> None:
     global _RUNTIME_THREAD
     _STOP_EVENT.set()
@@ -434,7 +434,7 @@ def stop_replication_runtime() -> None:
     _RUNTIME_THREAD = None
 
 
-# 中文：输出复制与接管状态，供 debug API 观测真实 leader/runtime 信息。
+# 输出复制与接管状态，供 debug API 观测真实 leader/runtime 信息。
 def get_replication_status() -> Dict[str, Any]:
     with _RUNTIME_LOCK:
         data = copy.deepcopy(_RUNTIME)

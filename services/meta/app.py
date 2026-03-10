@@ -8,14 +8,14 @@ from core.runtime import get_runtime_snapshot, is_writable_leader
 from api import router as api_router
 from repository import init_repository_schema
 
-# 中文：meta 服务主应用；路由在 api 层，状态与选主逻辑在 core 层。
+# meta 服务主应用；路由在 api 层，状态与选主逻辑在 core 层。
 app = FastAPI(title="317_DFS_Meta", version="0.1-p5")
 app.include_router(api_router)
 
 
 @app.on_event("startup")
 def startup_init_repository() -> None:
-    # 中文：启动阶段初始化 PostgreSQL schema，最多重试 30 次等待数据库就绪。
+    # 启动阶段初始化 PostgreSQL schema，最多重试 30 次等待数据库就绪。
     max_retries = 30
     sleep_sec = 1.0
 
@@ -30,14 +30,14 @@ def startup_init_repository() -> None:
     else:
         raise RuntimeError("failed to initialize postgres repository schema after retries")
 
-    # 中文：启动复制/接管运行时线程（leader 发送 heartbeat，follower 监控超时）。
+    # 启动复制/接管运行时线程（leader 发送 heartbeat，follower 监控超时）。
     start_replication_runtime()
 
-    # 中文：可写 leader 启动后主动推一次快照，避免 follower 长时间等待首次同步。
+    # 可写 leader 启动后主动推一次快照，避免 follower 长时间等待首次同步。
     if is_writable_leader():
         push_state_to_followers(reason="leader_startup")
 
-    # 中文：打印启动后的运行时角色，便于快速确认是否进入预期状态。
+    # 打印启动后的运行时角色，便于快速确认是否进入预期状态。
     runtime = get_runtime_snapshot()
     print(
         "[meta] runtime initialized:",
@@ -50,5 +50,5 @@ def startup_init_repository() -> None:
 
 @app.on_event("shutdown")
 def shutdown_replication_runtime() -> None:
-    # 中文：优雅停止后台线程，避免容器退出时残留任务。
+    # 优雅停止后台线程，避免容器退出时残留任务。
     stop_replication_runtime()

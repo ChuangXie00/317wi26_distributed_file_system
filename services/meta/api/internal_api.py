@@ -35,7 +35,7 @@ from .vo import (
 router = APIRouter()
 
 
-# 中文：写接口统一门禁，保证只有可写 leader 能处理写请求。
+# 写接口统一门禁，保证只有可写 leader 能处理写请求。
 def _ensure_leader_write_api() -> None:
     if not is_writable_leader():
         runtime = get_runtime_snapshot()
@@ -52,7 +52,7 @@ def _ensure_leader_write_api() -> None:
 
 @router.post("/internal/heartbeat", response_model=LeaderHeartbeatResp)
 def internal_heartbeat(req: LeaderHeartbeatReq) -> LeaderHeartbeatResp:
-    # 中文：任何节点都可接收 leader 心跳；若 epoch 更高会触发本地降级（fencing）。
+    # 任何节点都可接收 leader 心跳；若 epoch 更高会触发本地降级（fencing）。
     result = record_leader_heartbeat(
         leader_id=req.leader_id,
         leader_epoch=req.leader_epoch,
@@ -71,7 +71,7 @@ def internal_heartbeat(req: LeaderHeartbeatReq) -> LeaderHeartbeatResp:
 
 @router.post("/internal/replicate_state", response_model=ReplicateStateResp)
 def internal_replicate_state(req: ReplicateStateReq) -> ReplicateStateResp:
-    # 中文：复制接口支持在降级过程中接收新 leader 状态；旧 Lamport 消息会被忽略。
+    # 复制接口支持在降级过程中接收新 leader 状态；旧 Lamport 消息会被忽略。
     result = apply_replicated_state(req.dict())
     return ReplicateStateResp(
         status=str(result["status"]),
@@ -84,14 +84,14 @@ def internal_replicate_state(req: ReplicateStateReq) -> ReplicateStateResp:
 
 @router.get("/internal/state_snapshot")
 def internal_state_snapshot() -> dict:
-    # 中文：只允许可写 leader 导出快照，避免旧 leader 对外提供过期状态。
+    # 只允许可写 leader 导出快照，避免旧 leader 对外提供过期状态。
     _ensure_leader_write_api()
     return build_state_snapshot(reason="manual_snapshot")
 
 
 @router.post("/internal/election", response_model=ElectionResp)
 def internal_election(req: ElectionReq) -> ElectionResp:
-    # 中文：处理 election 请求，并按 Bully 规则决定是否回 OK 与是否本地发起选举。
+    # 处理 election 请求，并按 Bully 规则决定是否回 OK 与是否本地发起选举。
     result = handle_incoming_election(
         candidate_id=req.candidate_id,
         candidate_epoch=req.candidate_epoch,
@@ -99,14 +99,14 @@ def internal_election(req: ElectionReq) -> ElectionResp:
         reason=req.reason,
     )
     if bool(result.get("should_start_local_election", False)):
-        # 中文：异步发起本地 election，避免阻塞当前内部请求。
+        # 异步发起本地 election，避免阻塞当前内部请求。
         trigger_takeover_async(reason=f"bully_preempt_from_{req.candidate_id}")
     return ElectionResp(**result)
 
 
 @router.post("/internal/coordinator", response_model=CoordinatorResp)
 def internal_coordinator(req: CoordinatorReq) -> CoordinatorResp:
-    # 中文：收到 coordinator 后更新 leader 视图；更高 epoch 会强制降级。
+    # 收到 coordinator 后更新 leader 视图；更高 epoch 会强制降级。
     result = handle_incoming_coordinator(
         leader_id=req.leader_id,
         leader_epoch=req.leader_epoch,
@@ -126,7 +126,7 @@ def storage_heartbeat(req: StorageHeartbeatReq) -> StorageHeartbeatResp:
     if node_id not in STORAGE_NODES:
         raise HTTPException(status_code=400, detail=f"unknown storage node: {node_id}")
 
-    # 中文：通过 holder 暂存本次 heartbeat 的观测时间，供响应输出。
+    # 通过 holder 暂存本次 heartbeat 的观测时间，供响应输出。
     holder: Dict[str, str] = {"observed_at": ""}
 
     def _mutator(state: State) -> bool:
