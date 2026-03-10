@@ -4,6 +4,7 @@ __pycache__/
 .venv/
 .env/
 .doc/
+.tmp/
 
 # runtime data
 data/

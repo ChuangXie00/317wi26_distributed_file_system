@@ -5,13 +5,13 @@ from fastapi import FastAPI
 from core.config import ROLE
 from core.replication import push_state_to_followers, start_replication_runtime, stop_replication_runtime
 
+from api import router as api_router
 from repository import init_repository_schema
-from routers.client_api import router as client_router
 
-# main app for init router, logic is in routers and core
+# main app for init router, logic is in api and core
 # 0.1p03 - storage heartbeat refresh + membership
 app = FastAPI(title="317_DFS_Meta", version="0.1-p4")
-app.include_router(client_router)
+app.include_router(api_router)
 
 
 @app.on_event("startup")
