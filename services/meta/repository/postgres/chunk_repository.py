@@ -2,7 +2,7 @@ from typing import Any, List, Sequence
 
 import psycopg
 
-from .infra.connection import PostgresConnectionFactory
+from ..infra.connection import PostgresConnectionFactory
 
 
 class ChunkRepository:

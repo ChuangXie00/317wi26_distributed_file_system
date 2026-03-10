@@ -1,7 +1,7 @@
 import hashlib
 from typing import List, Optional, Sequence
 
-from .infra.connection import PostgresConnectionFactory
+from ..infra.connection import PostgresConnectionFactory
 
 
 class FileRepository:
