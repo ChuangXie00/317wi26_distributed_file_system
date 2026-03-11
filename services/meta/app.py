@@ -38,9 +38,12 @@ def startup_init_repository() -> None:
 
     # 启动前做一次重入探测：若本节点是“恢复的旧 leader”，先回归 follower，避免立即抢主。
     rejoin_probe = probe_cluster_leader_for_rejoin()
-    if is_writable_leader() and int(rejoin_probe.get("reachable_peer_count", 0)) > 0:
-        observed_leader_id = str(rejoin_probe.get("leader_id", "")).strip().lower()
-        observed_leader_epoch = int(rejoin_probe.get("leader_epoch", 0))
+    # 中文：只要能探测到 peer 且“本地可写或已观测到 leader”，就执行重入回归与冷却保护。
+    reachable_peer_count = int(rejoin_probe.get("reachable_peer_count", 0))
+    observed_leader_id = str(rejoin_probe.get("leader_id", "")).strip().lower()
+    observed_leader_epoch = int(rejoin_probe.get("leader_epoch", 0))
+    should_apply_rejoin = bool(reachable_peer_count > 0 and (is_writable_leader() or bool(observed_leader_id)))
+    if should_apply_rejoin:
 
         # peers 报告 leader 是自己时，仍按“恢复节点默认 follower”处理，避免旧主自认定写入。
         if observed_leader_id == META_NODE_ID:
@@ -57,7 +60,8 @@ def startup_init_repository() -> None:
             f"reason={rejoin_reason},",
             f"leader={rejoin_state.get('leader_id')},",
             f"epoch={rejoin_state.get('leader_epoch')},",
-            f"reachable_peers={rejoin_probe.get('reachable_peer_count')}",
+            f"reachable_peers={reachable_peer_count},",
+            f"holdoff_until={rejoin_state.get('rejoin_holdoff_until')}",
         )
 
     # 启动复制/接管运行时线程（leader 发送 heartbeat，follower 监控超时）。

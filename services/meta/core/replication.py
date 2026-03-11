@@ -24,6 +24,7 @@ from .runtime import (
     get_last_applied_lamport,
     get_leader_epoch,
     get_node_role,
+    get_rejoin_election_holdoff,
     get_runtime_snapshot,
     is_writable_leader,
     mark_last_applied_lamport,
@@ -403,6 +404,26 @@ def _send_heartbeat_to_peers() -> None:
 
 # 执行一次 takeover 流程（超时触发或内部预抢占触发）。
 def trigger_takeover(reason: str) -> Dict[str, Any]:
+    # 中文：重入冷却期内拒绝本地主动选举，避免恢复节点立即抢主。
+    rejoin_holdoff = get_rejoin_election_holdoff()
+    if bool(rejoin_holdoff.get("active", False)):
+        skipped_result = {
+            "status": "skipped",
+            "reason": "rejoin_election_holdoff",
+            "takeover_reason": str(reason),
+            "holdoff_remaining_sec": float(rejoin_holdoff.get("remaining_sec", 0.0)),
+            "holdoff_until": str(rejoin_holdoff.get("until", "")),
+            "holdoff_source_reason": str(rejoin_holdoff.get("source_reason", "")),
+        }
+        _update_runtime(
+            last_takeover_at=_now_iso(),
+            last_takeover_reason=reason,
+            last_takeover_result="skipped_rejoin_holdoff",
+            last_takeover_ts=time.time(),
+            last_takeover_detail=copy.deepcopy(skipped_result),
+        )
+        return skipped_result
+
     acquired = _ELECTION_LOCK.acquire(blocking=False)
     if not acquired:
         return {"status": "skipped", "reason": "election already in progress"}
@@ -457,6 +478,11 @@ def _maybe_takeover_by_timeout() -> None:
     reference_ts = last_ts if last_ts > 0 else started_ts
     elapsed = max(0.0, time.time() - reference_ts)
     if elapsed <= META_LEADER_HEARTBEAT_TIMEOUT_SEC:
+        return
+
+    # 中文：重入冷却期内不执行 timeout takeover，优先等待 leader 心跳恢复。
+    rejoin_holdoff = get_rejoin_election_holdoff()
+    if bool(rejoin_holdoff.get("active", False)):
         return
 
     # 简单冷却窗口，避免连续 timeout 触发过于频繁。

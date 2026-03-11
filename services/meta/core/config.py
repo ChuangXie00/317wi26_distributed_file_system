@@ -139,6 +139,14 @@ META_INTERNAL_TIMEOUT_SEC = _parse_float_env("META_INTERNAL_TIMEOUT_SEC", 2.0)
 META_HEARTBEAT_INTERVAL_SEC = _parse_float_env("META_HEARTBEAT_INTERVAL_SEC", 3.0)
 META_SYNC_INTERVAL_SEC = _parse_float_env("META_SYNC_INTERVAL_SEC", 5.0)
 META_LEADER_HEARTBEAT_TIMEOUT_SEC = _parse_float_env("META_LEADER_HEARTBEAT_TIMEOUT_SEC", 9.0)
+# 中文：重入节点发起本地选举前的冷却秒数，默认采用“心跳超时 + 心跳间隔”。
+META_REJOIN_ELECTION_HOLDOFF_SEC = max(
+    0.0,
+    _parse_float_env(
+        "META_REJOIN_ELECTION_HOLDOFF_SEC",
+        float(META_LEADER_HEARTBEAT_TIMEOUT_SEC + META_HEARTBEAT_INTERVAL_SEC),
+    ),
+)
 
 
 # 构造 PostgreSQL 连接参数，供 repository 工厂统一使用。

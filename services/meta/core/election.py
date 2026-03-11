@@ -15,6 +15,7 @@ from .runtime import (
     get_current_leader_id,
     get_leader_epoch,
     get_node_role,
+    get_rejoin_election_holdoff,
     mark_election_deferred,
     observe_candidate_epoch,
     observe_leader,
@@ -188,11 +189,15 @@ def handle_incoming_election(candidate_id: str, candidate_epoch: int, lamport: i
         and current_epoch >= normalized_epoch
         and current_leader_id >= normalized_candidate_id
     )
+    # 中文：重入冷却期内不主动抢主，优先等待现任 leader 继续收敛。
+    rejoin_holdoff = get_rejoin_election_holdoff()
+    rejoin_guard_active = bool(rejoin_holdoff.get("active", False))
     should_start_local_election = bool(
         has_higher_priority
         and not is_self_leader
         and not stale
         and not has_known_higher_or_equal_leader
+        and not rejoin_guard_active
     )
     ok = bool(has_higher_priority and not stale)
 

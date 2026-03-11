@@ -1,9 +1,10 @@
 import copy
+import time
 import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from .config import LEADER_ELECTION_MODE, META_BOOTSTRAP_ROLE, META_NODE_ID
+from .config import LEADER_ELECTION_MODE, META_BOOTSTRAP_ROLE, META_NODE_ID, META_REJOIN_ELECTION_HOLDOFF_SEC
 
 
 # 运行时状态锁；保护 role/leader/epoch/lamport 的并发读写一致性。
@@ -13,6 +14,14 @@ _RUNTIME_LOCK = threading.RLock()
 # 返回当前 UTC 时间的 ISO 字符串，统一调试字段格式。
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+# 中文：将 Unix 时间戳转成 UTC ISO 字符串，便于 debug 观察冷却结束时间点。
+def _iso_from_ts(ts: float) -> str:
+    normalized_ts = float(ts)
+    if normalized_ts <= 0:
+        return ""
+    return datetime.fromtimestamp(normalized_ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 # 规范化角色值，避免非法字符串污染运行态。
@@ -52,6 +61,11 @@ _RUNTIME_STATE: Dict[str, Any] = {
     "last_election_deferred_reason": "",
     "last_election_deferred_epoch": 0,
     "last_election_deferred_to": [],
+    # 中文：重入 follower 后的选举冷却窗口，避免恢复节点立刻抢主。
+    "last_rejoin_as_follower_at": "",
+    "last_rejoin_as_follower_reason": "",
+    "rejoin_election_holdoff_until_ts": 0.0,
+    "rejoin_election_holdoff_until": "",
 }
 
 
@@ -59,6 +73,24 @@ _RUNTIME_STATE: Dict[str, Any] = {
 def get_runtime_snapshot() -> Dict[str, Any]:
     with _RUNTIME_LOCK:
         return copy.deepcopy(_RUNTIME_STATE)
+
+
+# 中文：读取重入冷却状态；active=true 时本节点不应主动发起本地选举。
+def get_rejoin_election_holdoff(now_ts: Optional[float] = None) -> Dict[str, Any]:
+    check_ts = time.time() if now_ts is None else float(now_ts)
+    with _RUNTIME_LOCK:
+        holdoff_until_ts = float(_RUNTIME_STATE.get("rejoin_election_holdoff_until_ts", 0.0) or 0.0)
+        holdoff_until = str(_RUNTIME_STATE.get("rejoin_election_holdoff_until", ""))
+        source_reason = str(_RUNTIME_STATE.get("last_rejoin_as_follower_reason", ""))
+
+    remaining_sec = max(0.0, holdoff_until_ts - check_ts)
+    return {
+        "active": remaining_sec > 0,
+        "remaining_sec": round(remaining_sec, 3),
+        "until_ts": holdoff_until_ts,
+        "until": holdoff_until,
+        "source_reason": source_reason,
+    }
 
 
 # 获取当前角色（leader/follower/candidate）。
@@ -194,6 +226,9 @@ def promote_self_to_leader(epoch: int, reason: str) -> Dict[str, Any]:
         normalized_epoch = max(int(_RUNTIME_STATE.get("leader_epoch", 0)), max(0, int(epoch)))
         _set_epoch_unlocked(normalized_epoch, reason=f"promote_leader:{reason}")
         _RUNTIME_STATE["current_leader_id"] = META_NODE_ID
+        # 中文：当选 leader 后清空重入冷却标记，避免 debug 误导。
+        _RUNTIME_STATE["rejoin_election_holdoff_until_ts"] = 0.0
+        _RUNTIME_STATE["rejoin_election_holdoff_until"] = ""
         _set_role_unlocked("leader", reason=f"promote_leader:{reason}")
         lamport = tick_lamport(event="promote_leader")
         return {
@@ -279,6 +314,13 @@ def force_rejoin_as_follower(reason: str, observed_leader_id: str = "", observed
             _RUNTIME_STATE["current_leader_id"] = ""
 
         _set_role_unlocked("follower", reason=f"rejoin_as_follower:{reason}")
+        # 中文：重入后开启选举冷却，优先等待现任 leader 的心跳/协调收敛。
+        holdoff_sec = max(0.0, float(META_REJOIN_ELECTION_HOLDOFF_SEC))
+        holdoff_until_ts = time.time() + holdoff_sec if holdoff_sec > 0 else 0.0
+        _RUNTIME_STATE["last_rejoin_as_follower_at"] = _now_iso()
+        _RUNTIME_STATE["last_rejoin_as_follower_reason"] = str(reason)
+        _RUNTIME_STATE["rejoin_election_holdoff_until_ts"] = holdoff_until_ts
+        _RUNTIME_STATE["rejoin_election_holdoff_until"] = _iso_from_ts(holdoff_until_ts)
         lamport = tick_lamport(event="rejoin_as_follower")
         return {
             "role": str(_RUNTIME_STATE.get("role", "follower")),
@@ -286,4 +328,6 @@ def force_rejoin_as_follower(reason: str, observed_leader_id: str = "", observed
             "leader_epoch": int(_RUNTIME_STATE.get("leader_epoch", 0)),
             "lamport": lamport,
             "reason": str(reason),
+            "rejoin_holdoff_sec": holdoff_sec,
+            "rejoin_holdoff_until": str(_RUNTIME_STATE.get("rejoin_election_holdoff_until", "")),
         }
