@@ -15,6 +15,7 @@ from .runtime import (
     get_current_leader_id,
     get_leader_epoch,
     get_node_role,
+    mark_election_deferred,
     observe_candidate_epoch,
     observe_leader,
     promote_self_to_leader,
@@ -33,6 +34,16 @@ def _post_json(url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         if not raw:
             return {}
         return json.loads(raw.decode("utf-8"))
+
+
+# 规范化节点 ID，避免大小写/空白导致优先级比较不一致。
+def _normalize_node_id(raw_node_id: str) -> str:
+    return str(raw_node_id or "").strip().lower()
+
+
+# 返回当前可识别的 meta 节点集合（含自身），用于过滤未知节点的内部协议请求。
+def _known_meta_nodes() -> List[str]:
+    return sorted(set(get_meta_peer_nodes() + [META_NODE_ID]))
 
 
 # 选主策略抽象接口；Phase 5.0 当前仅实现 Bully。
@@ -70,12 +81,19 @@ class BullyElectionStrategy:
                 failed_nodes.append({"node_id": peer_node_id, "error": str(exc)})
 
         if ok_nodes:
+            # 三节点场景下，一旦确认更高优先级节点存活，本节点立即让位为 follower，避免重复抢占抖动。
+            defer_state = mark_election_deferred(
+                epoch=candidate_epoch,
+                reason=f"higher_node_alive:{reason}",
+                defer_to_nodes=ok_nodes,
+            )
             return {
                 "status": "deferred",
                 "reason": reason,
                 "candidate_epoch": candidate_epoch,
                 "ok_from_higher_nodes": ok_nodes,
                 "failed_nodes": failed_nodes,
+                "defer_state": defer_state,
             }
 
         # 没有更高优先级节点存活，则当前 candidate 直接晋升为 leader。
@@ -134,21 +152,48 @@ def broadcast_coordinator(leader_id: str, leader_epoch: int, lamport: int, reaso
 
 # 处理收到的 election 请求；返回 ok 与是否建议本节点启动本地 election。
 def handle_incoming_election(candidate_id: str, candidate_epoch: int, lamport: int, reason: str) -> Dict[str, Any]:
-    normalized_candidate_id = str(candidate_id).strip()
+    normalized_candidate_id = _normalize_node_id(candidate_id)
     normalized_epoch = max(0, int(candidate_epoch))
     before_epoch = get_leader_epoch()
+    before_leader = _normalize_node_id(get_current_leader_id())
+    known_nodes = _known_meta_nodes()
 
     tick_lamport(event="recv_election", incoming_lamport=int(lamport))
 
-    stale = normalized_epoch < before_epoch
+    # 以下请求视为 stale：未知节点、候选者是自己、epoch 倒退、同 epoch 但已存在更高优先级 leader。
+    stale = (
+        normalized_candidate_id not in known_nodes
+        or normalized_candidate_id == META_NODE_ID
+        or normalized_epoch < before_epoch
+        or (
+            normalized_epoch == before_epoch
+            and bool(before_leader)
+            and before_leader != normalized_candidate_id
+            and before_leader > normalized_candidate_id
+        )
+    )
+
     if not stale:
         # 收到更高 epoch 的 candidate 时，先更新本地 epoch 并降级为 follower（fencing）。
         observe_candidate_epoch(candidate_epoch=normalized_epoch, reason=f"incoming_election:{reason}")
 
     local_role = get_node_role()
+    current_leader_id = _normalize_node_id(get_current_leader_id())
+    current_epoch = get_leader_epoch()
     has_higher_priority = META_NODE_ID > normalized_candidate_id
     is_self_leader = local_role == "leader" and get_current_leader_id() == META_NODE_ID
-    should_start_local_election = bool(has_higher_priority and not is_self_leader and not stale)
+    # 三节点稳定化：若本地已知同/更高 epoch 的更高优先级 leader，则只回复 ok，不再重复触发本地选举。
+    has_known_higher_or_equal_leader = bool(
+        current_leader_id
+        and current_epoch >= normalized_epoch
+        and current_leader_id >= normalized_candidate_id
+    )
+    should_start_local_election = bool(
+        has_higher_priority
+        and not is_self_leader
+        and not stale
+        and not has_known_higher_or_equal_leader
+    )
     ok = bool(has_higher_priority and not stale)
 
     resp_lamport = tick_lamport(event="send_election_response")
@@ -167,8 +212,24 @@ def handle_incoming_election(candidate_id: str, candidate_epoch: int, lamport: i
 # 处理收到的 coordinator 消息；根据 epoch 执行 leader 视图更新与强制降级。
 def handle_incoming_coordinator(leader_id: str, leader_epoch: int, lamport: int, reason: str) -> Dict[str, Any]:
     tick_lamport(event="recv_coordinator", incoming_lamport=int(lamport))
+    normalized_leader_id = _normalize_node_id(leader_id)
+
+    # 仅接受来自已知 meta 节点的 coordinator，防止未知节点污染 leader 视图。
+    if normalized_leader_id not in _known_meta_nodes():
+        ack_lamport = tick_lamport(event="send_coordinator_ack_unknown_leader")
+        return {
+            "status": "ack",
+            "changed": False,
+            "ignored": True,
+            "node_id": META_NODE_ID,
+            "role": get_node_role(),
+            "leader_id": get_current_leader_id(),
+            "leader_epoch": get_leader_epoch(),
+            "lamport": ack_lamport,
+        }
+
     observe_result = observe_leader(
-        leader_id=str(leader_id).strip(),
+        leader_id=normalized_leader_id,
         leader_epoch=max(0, int(leader_epoch)),
         reason=f"incoming_coordinator:{reason}",
     )

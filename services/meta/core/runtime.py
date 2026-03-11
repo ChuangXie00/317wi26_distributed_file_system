@@ -1,7 +1,7 @@
 import copy
 import threading
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from .config import LEADER_ELECTION_MODE, META_BOOTSTRAP_ROLE, META_NODE_ID
 
@@ -47,6 +47,11 @@ _RUNTIME_STATE: Dict[str, Any] = {
     "last_role_change_reason": "bootstrap",
     "last_epoch_change_at": _now_iso(),
     "last_epoch_change_reason": "bootstrap",
+    # 记录最近一次“我让位给更高优先级节点”的观测信息，便于排查三节点选举抖动。
+    "last_election_deferred_at": "",
+    "last_election_deferred_reason": "",
+    "last_election_deferred_epoch": 0,
+    "last_election_deferred_to": [],
 }
 
 
@@ -155,6 +160,31 @@ def begin_election_round(reason: str) -> Dict[str, Any]:
             "epoch": next_epoch,
             "lamport": lamport,
             "role": str(_RUNTIME_STATE["role"]),
+        }
+
+
+# 标记本轮选举被更高优先级节点接管，本节点退回 follower 等待 coordinator 收敛。
+def mark_election_deferred(epoch: int, reason: str, defer_to_nodes: Optional[List[str]] = None) -> Dict[str, Any]:
+    normalized_epoch = max(0, int(epoch))
+    normalized_defer_to = [str(node_id).strip() for node_id in (defer_to_nodes or []) if str(node_id).strip()]
+
+    with _RUNTIME_LOCK:
+        # 让位并不降低 epoch；仅在必要时抬升到本轮候选 epoch。
+        if normalized_epoch > int(_RUNTIME_STATE.get("leader_epoch", 0)):
+            _set_epoch_unlocked(normalized_epoch, reason=f"election_deferred:{reason}")
+
+        _set_role_unlocked("follower", reason=f"election_deferred:{reason}")
+        _RUNTIME_STATE["last_election_deferred_at"] = _now_iso()
+        _RUNTIME_STATE["last_election_deferred_reason"] = str(reason)
+        _RUNTIME_STATE["last_election_deferred_epoch"] = int(_RUNTIME_STATE.get("leader_epoch", 0))
+        _RUNTIME_STATE["last_election_deferred_to"] = normalized_defer_to
+        lamport = tick_lamport(event="election_deferred")
+        return {
+            "role": str(_RUNTIME_STATE.get("role", "follower")),
+            "leader_id": str(_RUNTIME_STATE.get("current_leader_id", "")),
+            "leader_epoch": int(_RUNTIME_STATE.get("leader_epoch", 0)),
+            "lamport": lamport,
+            "defer_to_nodes": normalized_defer_to,
         }
 
 
