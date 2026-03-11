@@ -1,3 +1,4 @@
+# 文件作用：定义 DFS 本地开发/演示环境的容器编排（meta 集群、storage 集群、postgres 与入口路由）。
 services:
   # Postgres DB (01P3.1)
   postgres:
@@ -36,11 +37,12 @@ services:
     container_name: meta-01
     environment:
       # 0.1p5.0：运行时角色 bootstrap，后续由 election/coordinator 动态收敛。
+      # 0.1p5.1：三节点部署下的本节点标识与集群成员清单。
       - META_NODE_ID=meta-01
       - META_ROLE=leader
       # 0.1p5.0：统一选主配置（本阶段仅支持 bully，非 bully 启动即失败）。
       - LEADER_ELECTION_MODE=bully
-      - META_CLUSTER_NODES=meta-01,meta-02
+      - META_CLUSTER_NODES=meta-01,meta-02,meta-03
       - META_INTERNAL_PORT=8000
       - REPLICATION_FACTOR=2
       - STORAGE_NODES=storage-01, storage-02, storage-03
@@ -55,7 +57,7 @@ services:
       - MEMBERSHIP_SWEEP_INTERVAL_SEC=1
 
       # 0.1p04 历史兼容：leader -> follower 同步参数（p5 主路径改为 cluster peers）
-      - META_FOLLOWER_URLS=http://meta-02:8000
+      - META_FOLLOWER_URLS=http://meta-02:8000,http://meta-03:8000
       - META_INTERNAL_TIMEOUT_SEC=2
       - META_HEARTBEAT_INTERVAL_SEC=3
       - META_SYNC_INTERVAL_SEC=5
@@ -84,11 +86,12 @@ services:
     build: ../services/meta
     container_name: meta-02
     environment:
+      # 0.1p5.1：三节点部署下的本节点标识与集群成员清单。
       - META_NODE_ID=meta-02
       - META_ROLE=follower
       # 0.1p5.0：统一选主配置（本阶段仅支持 bully，非 bully 启动即失败）。
       - LEADER_ELECTION_MODE=bully
-      - META_CLUSTER_NODES=meta-01,meta-02
+      - META_CLUSTER_NODES=meta-01,meta-02,meta-03
       - META_INTERNAL_PORT=8000
       - REPLICATION_FACTOR=2
       - STORAGE_NODES=storage-01,storage-02,storage-03
@@ -124,6 +127,58 @@ services:
     # 0.1p04 暴露8002用于本地测试验证warm standby机制
     ports:
       - "8002:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - dfs-net
+
+  # 0.1p5.1：新增第三个 meta 节点，用于三节点 Bully 稳定化验证。
+  meta-03:
+    build: ../services/meta
+    container_name: meta-03
+    environment:
+      # 0.1p5.1：三节点部署下的本节点标识与集群成员清单。
+      - META_NODE_ID=meta-03
+      - META_ROLE=follower
+      # 0.1p5.0：统一选主配置（本阶段仅支持 bully，非 bully 启动即失败）。
+      - LEADER_ELECTION_MODE=bully
+      - META_CLUSTER_NODES=meta-01,meta-02,meta-03
+      - META_INTERNAL_PORT=8000
+      - REPLICATION_FACTOR=2
+      - STORAGE_NODES=storage-01,storage-02,storage-03
+      - ENABLE_STORAGE_HEALTHCHECK=1
+      - STORAGE_PORT=9009
+      - METADATA_FILE=metadata.json
+      - DATA_DIR=/data
+
+      # 0.1p03 heartbeat and membership timeout settings
+      - HEARTBEAT_INTERVAL_SEC=3
+      - HEARTBEAT_TIMEOUT_SEC=9
+      - MEMBERSHIP_SWEEP_INTERVAL_SEC=1
+
+      # 0.1p04 历史兼容：follower 观测 leader 地址（p5 主路径改为 cluster peers）
+      - META_LEADER_URL=http://meta-01:8000
+      - META_INTERNAL_TIMEOUT_SEC=2
+      - META_HEARTBEAT_INTERVAL_SEC=3
+      - META_SYNC_INTERVAL_SEC=5
+      - META_LEADER_HEARTBEAT_TIMEOUT_SEC=9
+
+      # 0.1p3.1 postgres settings
+      - PG_HOST=postgres
+      - PG_PORT=5432
+      - PG_DATABASE=dfs_meta
+      - PG_USER=dfs_user
+      - PG_PASSWORD=dfs_pass
+      - PG_SSLMODE=disable
+      - PG_CONNECT_TIMEOUT_SEC=5
+      - PG_STATEMENT_TIMEOUT_MS=8000
+      - DEFAULT_NAMESPACE=default
+    volumes:
+      - ../data/meta-follower-03:/data
+    # 0.1p5.1 暴露 8003 便于本地调试与故障演练观测。
+    ports:
+      - "8003:8000"
     depends_on:
       postgres:
         condition: service_healthy
