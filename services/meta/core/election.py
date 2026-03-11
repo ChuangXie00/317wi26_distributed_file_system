@@ -1,5 +1,5 @@
 import json
-from typing import Any, Dict, List, Protocol
+from typing import Any, Callable, Dict, List, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request as UrlRequest, urlopen
 
@@ -49,12 +49,24 @@ def _known_meta_nodes() -> List[str]:
 
 # 选主策略抽象接口；Phase 5.0 当前仅实现 Bully。
 class ElectionStrategy(Protocol):
+    # 中文：触发本节点发起一轮选主流程，返回本轮执行结果。
     def trigger_election(self, reason: str) -> Dict[str, Any]:
+        ...
+
+    # 中文：处理来自其他节点的 election 请求，返回协议响应字段。
+    def handle_incoming_election(
+        self,
+        candidate_id: str,
+        candidate_epoch: int,
+        lamport: int,
+        reason: str,
+    ) -> Dict[str, Any]:
         ...
 
 
 # Bully 策略实现（按 node_id 字典序比较优先级）。
 class BullyElectionStrategy:
+    # 中文：按 Bully 规则发起选举，只向更高优先级节点发起请求。
     def trigger_election(self, reason: str) -> Dict[str, Any]:
         round_info = begin_election_round(reason=reason)
         candidate_epoch = int(round_info["epoch"])
@@ -114,12 +126,105 @@ class BullyElectionStrategy:
             "broadcast": broadcast_result,
         }
 
+    # 中文：按 Bully 规则处理入站 election 请求，并决定是否建议本地预抢占选举。
+    def handle_incoming_election(
+        self,
+        candidate_id: str,
+        candidate_epoch: int,
+        lamport: int,
+        reason: str,
+    ) -> Dict[str, Any]:
+        normalized_candidate_id = _normalize_node_id(candidate_id)
+        normalized_epoch = max(0, int(candidate_epoch))
+        before_epoch = get_leader_epoch()
+        before_leader = _normalize_node_id(get_current_leader_id())
+        known_nodes = _known_meta_nodes()
 
-# 根据配置获取选主策略实例；当前仅支持 bully。
+        tick_lamport(event="recv_election", incoming_lamport=int(lamport))
+
+        # 以下请求视为 stale：未知节点、候选者是自己、epoch 倒退、同 epoch 但已存在更高优先级 leader。
+        stale = (
+            normalized_candidate_id not in known_nodes
+            or normalized_candidate_id == META_NODE_ID
+            or normalized_epoch < before_epoch
+            or (
+                normalized_epoch == before_epoch
+                and bool(before_leader)
+                and before_leader != normalized_candidate_id
+                and before_leader > normalized_candidate_id
+            )
+        )
+
+        if not stale:
+            # 收到更高 epoch 的 candidate 时，先更新本地 epoch 并降级为 follower（fencing）。
+            observe_candidate_epoch(candidate_epoch=normalized_epoch, reason=f"incoming_election:{reason}")
+
+        local_role = get_node_role()
+        current_leader_id = _normalize_node_id(get_current_leader_id())
+        current_epoch = get_leader_epoch()
+        has_higher_priority = META_NODE_ID > normalized_candidate_id
+        is_self_leader = local_role == "leader" and get_current_leader_id() == META_NODE_ID
+        # 三节点稳定化：若本地已知同/更高 epoch 的更高优先级 leader，则只回复 ok，不再重复触发本地选举。
+        has_known_higher_or_equal_leader = bool(
+            current_leader_id
+            and current_epoch >= normalized_epoch
+            and current_leader_id >= normalized_candidate_id
+        )
+        # 中文：重入冷却期内不主动抢主，优先等待现任 leader 继续收敛。
+        rejoin_holdoff = get_rejoin_election_holdoff()
+        rejoin_guard_active = bool(rejoin_holdoff.get("active", False))
+        should_start_local_election = bool(
+            has_higher_priority
+            and not is_self_leader
+            and not stale
+            and not has_known_higher_or_equal_leader
+            and not rejoin_guard_active
+        )
+        ok = bool(has_higher_priority and not stale)
+
+        resp_lamport = tick_lamport(event="send_election_response")
+        return {
+            "status": "ok",
+            "ok": ok,
+            "stale": stale,
+            "should_start_local_election": should_start_local_election,
+            "responder_id": META_NODE_ID,
+            "responder_role": get_node_role(),
+            "responder_epoch": get_leader_epoch(),
+            "lamport": resp_lamport,
+        }
+
+
+# Quorum 策略占位实现；Phase 5.2 后续提交将补齐多数投票链路。
+class QuorumElectionStrategy:
+    # 中文：当前提交仅完成策略拆分，不在此提交启用 quorum 具体逻辑。
+    def trigger_election(self, reason: str) -> Dict[str, Any]:
+        raise RuntimeError("quorum election is not implemented in this commit")
+
+    # 中文：当前提交仅保留接口占位，避免在接入前误用 quorum 入站处理。
+    def handle_incoming_election(
+        self,
+        candidate_id: str,
+        candidate_epoch: int,
+        lamport: int,
+        reason: str,
+    ) -> Dict[str, Any]:
+        raise RuntimeError("quorum incoming election handler is not implemented in this commit")
+
+
+# 中文：策略工厂映射，统一管理不同选主模式对应的策略实现。
+_ELECTION_STRATEGY_FACTORIES: Dict[str, Callable[[], ElectionStrategy]] = {
+    "bully": BullyElectionStrategy,
+    "quorum": QuorumElectionStrategy,
+}
+
+
+# 根据配置获取选主策略实例；具体模式能力在各策略内自行约束。
 def get_election_strategy() -> ElectionStrategy:
-    if LEADER_ELECTION_MODE == "bully":
-        return BullyElectionStrategy()
-    raise RuntimeError(f"unsupported LEADER_ELECTION_MODE={LEADER_ELECTION_MODE!r}")
+    strategy_factory = _ELECTION_STRATEGY_FACTORIES.get(LEADER_ELECTION_MODE)
+    if strategy_factory is None:
+        raise RuntimeError(f"unsupported LEADER_ELECTION_MODE={LEADER_ELECTION_MODE!r}")
+    return strategy_factory()
 
 
 # 对外统一入口，触发一次选主流程。
@@ -153,65 +258,13 @@ def broadcast_coordinator(leader_id: str, leader_epoch: int, lamport: int, reaso
 
 # 处理收到的 election 请求；返回 ok 与是否建议本节点启动本地 election。
 def handle_incoming_election(candidate_id: str, candidate_epoch: int, lamport: int, reason: str) -> Dict[str, Any]:
-    normalized_candidate_id = _normalize_node_id(candidate_id)
-    normalized_epoch = max(0, int(candidate_epoch))
-    before_epoch = get_leader_epoch()
-    before_leader = _normalize_node_id(get_current_leader_id())
-    known_nodes = _known_meta_nodes()
-
-    tick_lamport(event="recv_election", incoming_lamport=int(lamport))
-
-    # 以下请求视为 stale：未知节点、候选者是自己、epoch 倒退、同 epoch 但已存在更高优先级 leader。
-    stale = (
-        normalized_candidate_id not in known_nodes
-        or normalized_candidate_id == META_NODE_ID
-        or normalized_epoch < before_epoch
-        or (
-            normalized_epoch == before_epoch
-            and bool(before_leader)
-            and before_leader != normalized_candidate_id
-            and before_leader > normalized_candidate_id
-        )
+    strategy = get_election_strategy()
+    return strategy.handle_incoming_election(
+        candidate_id=candidate_id,
+        candidate_epoch=candidate_epoch,
+        lamport=lamport,
+        reason=reason,
     )
-
-    if not stale:
-        # 收到更高 epoch 的 candidate 时，先更新本地 epoch 并降级为 follower（fencing）。
-        observe_candidate_epoch(candidate_epoch=normalized_epoch, reason=f"incoming_election:{reason}")
-
-    local_role = get_node_role()
-    current_leader_id = _normalize_node_id(get_current_leader_id())
-    current_epoch = get_leader_epoch()
-    has_higher_priority = META_NODE_ID > normalized_candidate_id
-    is_self_leader = local_role == "leader" and get_current_leader_id() == META_NODE_ID
-    # 三节点稳定化：若本地已知同/更高 epoch 的更高优先级 leader，则只回复 ok，不再重复触发本地选举。
-    has_known_higher_or_equal_leader = bool(
-        current_leader_id
-        and current_epoch >= normalized_epoch
-        and current_leader_id >= normalized_candidate_id
-    )
-    # 中文：重入冷却期内不主动抢主，优先等待现任 leader 继续收敛。
-    rejoin_holdoff = get_rejoin_election_holdoff()
-    rejoin_guard_active = bool(rejoin_holdoff.get("active", False))
-    should_start_local_election = bool(
-        has_higher_priority
-        and not is_self_leader
-        and not stale
-        and not has_known_higher_or_equal_leader
-        and not rejoin_guard_active
-    )
-    ok = bool(has_higher_priority and not stale)
-
-    resp_lamport = tick_lamport(event="send_election_response")
-    return {
-        "status": "ok",
-        "ok": ok,
-        "stale": stale,
-        "should_start_local_election": should_start_local_election,
-        "responder_id": META_NODE_ID,
-        "responder_role": get_node_role(),
-        "responder_epoch": get_leader_epoch(),
-        "lamport": resp_lamport,
-    }
 
 
 # 处理收到的 coordinator 消息；根据 epoch 执行 leader 视图更新与强制降级。

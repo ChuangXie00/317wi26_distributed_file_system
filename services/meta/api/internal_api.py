@@ -91,7 +91,7 @@ def internal_state_snapshot() -> dict:
 
 @router.post("/internal/election", response_model=ElectionResp)
 def internal_election(req: ElectionReq) -> ElectionResp:
-    # 处理 election 请求，并按 Bully 规则决定是否回 OK 与是否本地发起选举。
+    # 处理 election 请求，并按当前选主策略决定是否回 OK 与是否本地发起选举。
     result = handle_incoming_election(
         candidate_id=req.candidate_id,
         candidate_epoch=req.candidate_epoch,
