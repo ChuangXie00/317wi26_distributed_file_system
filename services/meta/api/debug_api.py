@@ -2,7 +2,7 @@ from fastapi import APIRouter
 
 from core.replication import get_replication_status
 from core.runtime import get_runtime_snapshot, is_writable_leader
-from core.state import get_membership_snapshot, load_state, persist_state, refresh_storage_membership
+from core.state import get_membership_snapshot, load_state, persist_state, refresh_cluster_membership
 from repository import get_repository
 
 router = APIRouter()
@@ -30,9 +30,9 @@ def debug_membership() -> dict:
     state = load_state()
     refreshed = False
 
-    # 仅可写 leader 主动刷新超时，保证 debug 输出反映最新 membership。
+    # 仅可写 leader 主动刷新完整 cluster membership，保证 debug 输出包含 meta/storage 最新状态。
     if is_writable_leader():
-        refreshed = refresh_storage_membership(state)
+        refreshed = refresh_cluster_membership(state)
         if refreshed:
             persist_state(state)
 

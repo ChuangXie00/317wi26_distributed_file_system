@@ -36,7 +36,7 @@ from .state import (
     load_state,
     mutate_state,
     persist_state,
-    refresh_storage_membership,
+    refresh_cluster_membership,
 )
 
 
@@ -222,7 +222,8 @@ def _sanitize_membership(raw_membership: Any) -> Dict[str, Dict[str, Any]]:
 # 构造状态快照（仅同步 membership；files/chunks 由 PostgreSQL 承载）。
 def build_state_snapshot(reason: str = "manual") -> Dict[str, Any]:
     state = load_state()
-    if is_writable_leader() and refresh_storage_membership(state):
+    # 可写 leader 推送快照前刷新完整 cluster membership（storage + meta）。
+    if is_writable_leader() and refresh_cluster_membership(state):
         persist_state(state)
 
     lamport = tick_lamport(event="build_replicate_state")

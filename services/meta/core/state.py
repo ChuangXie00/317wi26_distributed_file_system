@@ -11,13 +11,18 @@ from urllib.request import urlopen
 
 from .config import (
     DATA_DIR,
+    META_INTERNAL_TIMEOUT_SEC,
+    META_NODE_ID,
     METADATA_FILE,
     ENABLE_STORAGE_HEALTHCHECK,
     HEARTBEAT_TIMEOUT_SEC,
     STORAGE_HEALTHCHECK_TIMEOUT_SEC,
     STORAGE_NODES,
     STORAGE_PORT,
+    build_meta_base_url,
+    get_meta_peer_nodes,
 )
+from .runtime import get_runtime_snapshot, is_writable_leader
 
 State = Dict[str, Any]
 MembershipEntry = Dict[str, Any]
@@ -135,7 +140,15 @@ def mutate_state(mutator: StateMutator) -> State:
 
 
 
-# normalize membership status
+# 将任意值安全转换为 int，避免脏数据导致 membership 刷新中断。
+def _safe_int(raw_value: Any, default: int = 0) -> int:
+    try:
+        return int(raw_value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+# 规范化 membership 状态枚举，确保只落盘 alive/dead/suspected。
 def _normalize_status(raw_status: str) -> str:
     normalized = str(raw_status or "").strip().lower()
     if normalized in {"alive", "dead", "suspected"}:
@@ -143,37 +156,116 @@ def _normalize_status(raw_status: str) -> str:
     return "dead"
 
 
-# build a normalized membership entry.
-def _new_membership_entry(now_ts: float, status: str = "alive") -> MembershipEntry:
+# 规范化节点类型，扩展 meta 节点 membership 时统一使用 node_type 区分。
+def _normalize_node_type(raw_node_type: str, node_id: str) -> str:
+    normalized = str(raw_node_type or "").strip().lower()
+    if normalized in {"storage", "meta"}:
+        return normalized
+    return "meta" if str(node_id or "").strip().lower().startswith("meta-") else "storage"
+
+
+# 规范化 runtime role 字段，避免非法角色值进入 membership。
+def _normalize_meta_role(raw_role: str) -> str:
+    role = str(raw_role or "").strip().lower()
+    if role in {"leader", "follower", "candidate"}:
+        return role
+    return "follower"
+
+
+# 生成标准 membership 条目（storage 默认结构）。
+def _new_membership_entry(now_ts: float, status: str = "alive", node_type: str = "storage") -> MembershipEntry:
     return {
+        "node_type": "meta" if str(node_type).strip().lower() == "meta" else "storage",
         "status": _normalize_status(status),
         "last_heartbeat_ts": float(now_ts),
         "last_heartbeat_at": _timestamp_to_iso(float(now_ts)),
     }
 
-# coerce legacy membership entry formats into current structured format
-def _coerce_membership_entry(raw: Any, now_ts: float) -> MembershipEntry:
-    # compatible with old format in 0.1p02(membership may be str)
+
+# 生成 meta 节点 membership 条目（包含角色、leader 视图与 Lamport 观测）。
+def _new_meta_membership_entry(
+    node_id: str,
+    now_ts: float,
+    status: str = "alive",
+    role: str = "follower",
+    current_leader_id: str = "",
+    leader_epoch: int = 0,
+    lamport: int = 0,
+    writable_leader: bool = False,
+    source: str = "meta_runtime",
+) -> MembershipEntry:
+    base_entry = _new_membership_entry(now_ts, status=status, node_type="meta")
+    base_entry.update(
+        {
+            "role": _normalize_meta_role(role),
+            "current_leader_id": str(current_leader_id or "").strip().lower(),
+            "leader_epoch": max(0, int(leader_epoch)),
+            "lamport": max(0, int(lamport)),
+            "writable_leader": bool(writable_leader),
+            "source": str(source or "").strip() or "meta_runtime",
+            "node_id": str(node_id or "").strip().lower(),
+        }
+    )
+    return base_entry
+
+
+# 兼容旧版 membership 结构，并按 node_type 统一输出规范化条目。
+def _coerce_membership_entry(raw: Any, now_ts: float, node_id: str = "") -> MembershipEntry:
+    normalized_node_id = str(node_id or "").strip().lower()
+
+    # 兼容 0.1p02 的字符串格式（value 仅有状态）。
     if isinstance(raw, str):
-        return _new_membership_entry(now_ts, status = raw)
-    
+        if _normalize_node_type("", normalized_node_id) == "meta":
+            return _new_meta_membership_entry(
+                node_id=normalized_node_id,
+                now_ts=now_ts,
+                status=raw,
+                source="legacy_string",
+            )
+        return _new_membership_entry(now_ts, status=raw, node_type="storage")
+
     if isinstance(raw, dict):
+        node_type = _normalize_node_type(str(raw.get("node_type", "")), normalized_node_id)
         status = _normalize_status(raw.get("status", "alive"))
         ts_raw = raw.get("last_heartbeat_ts")
         hb_ts = float(ts_raw) if isinstance(ts_raw, (int, float)) else float(now_ts)
         hb_at = raw.get("last_heartbeat_at")
         if not hb_at:
             hb_at = _timestamp_to_iso(hb_ts)
+
+        if node_type == "meta":
+            return {
+                "node_type": "meta",
+                "status": status,
+                "last_heartbeat_ts": hb_ts,
+                "last_heartbeat_at": str(hb_at),
+                "role": _normalize_meta_role(raw.get("role", "follower")),
+                "current_leader_id": str(raw.get("current_leader_id", raw.get("leader", ""))).strip().lower(),
+                "leader_epoch": max(0, _safe_int(raw.get("leader_epoch", 0))),
+                "lamport": max(0, _safe_int(raw.get("lamport", 0))),
+                "writable_leader": bool(raw.get("writable_leader", False)),
+                "source": str(raw.get("source", "meta_membership")).strip() or "meta_membership",
+                "node_id": normalized_node_id,
+            }
+
         return {
+            "node_type": "storage",
             "status": status,
             "last_heartbeat_ts": hb_ts,
             "last_heartbeat_at": str(hb_at),
         }
-    
-    return _new_membership_entry(now_ts, status="alive")
+
+    if _normalize_node_type("", normalized_node_id) == "meta":
+        return _new_meta_membership_entry(
+            node_id=normalized_node_id,
+            now_ts=now_ts,
+            status="suspected",
+            source="default_meta",
+        )
+    return _new_membership_entry(now_ts, status="alive", node_type="storage")
 
 
-# ensure membership schema completeness and all storage node entries exist
+# 确保 membership schema 完整：storage 与 meta 节点条目都存在且格式规范。
 def ensure_membership_schema(state: State, now_ts: Optional[float] = None) -> bool:
     now_ts = _now_timestamp() if now_ts is None else float(now_ts)
     changed = False
@@ -184,25 +276,38 @@ def ensure_membership_schema(state: State, now_ts: Optional[float] = None) -> bo
         membership_raw = state["membership"]
         changed = True
 
-    # normalize current str(compatible with old format)
+    # 规范化现有条目（兼容旧格式与缺字段格式）。
     for node_id in list(membership_raw.keys()):
-        normalized = _coerce_membership_entry(membership_raw[node_id], now_ts)
+        normalized = _coerce_membership_entry(membership_raw[node_id], now_ts, node_id=node_id)
         if membership_raw[node_id] != normalized:
             membership_raw[node_id] = normalized
             changed = True
 
+    # 保证 storage 节点条目完整。
     for node_id in STORAGE_NODES:
         if node_id not in membership_raw:
-            membership_raw[node_id] = _new_membership_entry(now_ts, status="alive")
+            membership_raw[node_id] = _new_membership_entry(now_ts, status="alive", node_type="storage")
             changed = True
-    
+
+    # 保证 meta 节点条目完整（自身默认 alive，peer 默认 suspected）。
+    for node_id in [META_NODE_ID] + get_meta_peer_nodes():
+        if node_id not in membership_raw:
+            default_status = "alive" if node_id == META_NODE_ID else "suspected"
+            membership_raw[node_id] = _new_meta_membership_entry(
+                node_id=node_id,
+                now_ts=now_ts,
+                status=default_status,
+                source="schema_init",
+            )
+            changed = True
+
     return changed
 
 
-# wark storage heartbeat with optional min write interval to reduce write amplification
+# 记录 storage heartbeat（可设置最小落盘间隔，降低频繁写放大）。
 def mark_storage_heartbeat(
     state: State,
-    node_id: str, 
+    node_id: str,
     now_ts: Optional[float] = None,
     min_interval_sec: float = 0.0,
 ) -> bool:
@@ -210,29 +315,29 @@ def mark_storage_heartbeat(
     changed = ensure_membership_schema(state, now_ts=now_ts)
     membership = state.setdefault("membership", {})
 
-    old_entry = _coerce_membership_entry(membership.get(node_id), now_ts)
+    old_entry = _coerce_membership_entry(membership.get(node_id), now_ts, node_id=node_id)
     elapsed = now_ts - float(old_entry.get("last_heartbeat_ts", 0.0))
     if old_entry.get("status") == "alive" and elapsed < max(0.0, float(min_interval_sec)):
         return changed
 
-    new_entry = _new_membership_entry(now_ts, status="alive")
+    new_entry = _new_membership_entry(now_ts, status="alive", node_type="storage")
     if old_entry != new_entry:
         changed = True
     membership[node_id] = new_entry
     return changed
 
 
-# heartbeat timeout rule: transition alive/suspected nodes to dead.
+# storage heartbeat 超时规则：alive/suspected 转为 dead。
 def apply_storage_heartbeat_timeout(state: State, now_ts: Optional[float] = None) -> bool:
     now_ts = _now_timestamp() if now_ts is None else float(now_ts)
     changed = ensure_membership_schema(state, now_ts=now_ts)
     membership = state.setdefault("membership", {})
 
     for node_id in STORAGE_NODES:
-        entry = _coerce_membership_entry(membership.get(node_id), now_ts)
+        entry = _coerce_membership_entry(membership.get(node_id), now_ts, node_id=node_id)
         elapsed = now_ts - float(entry.get("last_heartbeat_ts", 0.0))
 
-        # alive/suspected 节点超时后统一标记 dead
+        # alive/suspected 节点超时后统一标记 dead。
         if entry["status"] in {"alive", "suspected"} and elapsed > HEARTBEAT_TIMEOUT_SEC:
             entry["status"] = "dead"
             changed = True
@@ -241,7 +346,8 @@ def apply_storage_heartbeat_timeout(state: State, now_ts: Optional[float] = None
 
     return changed
 
-# 统一membership刷新流程(schema修复+超时处理)
+
+# 刷新 storage membership（schema 修复 + 超时淘汰）。
 def refresh_storage_membership(state: State, now_ts: Optional[float] = None) -> bool:
     now_ts = _now_timestamp() if now_ts is None else float(now_ts)
     changed = ensure_membership_schema(state, now_ts=now_ts)
@@ -250,6 +356,92 @@ def refresh_storage_membership(state: State, now_ts: Optional[float] = None) -> 
     return changed
 
 
+# 探测单个 meta peer 的 leader 运行态（用于更新 meta membership 条目）。
+def _probe_meta_runtime(node_id: str) -> Dict[str, Any]:
+    probe_url = f"{build_meta_base_url(node_id)}/debug/leader"
+    with urlopen(probe_url, timeout=META_INTERNAL_TIMEOUT_SEC) as response:
+        if response.status != 200:
+            raise RuntimeError(f"meta probe failed: status={response.status}, url={probe_url}")
+        raw = response.read()
+        payload = json.loads(raw.decode("utf-8")) if raw else {}
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"meta probe payload invalid: url={probe_url}")
+        return payload
+
+
+# 刷新 meta membership：写入本地 runtime，并探测 peer 节点存活与 leader 视图。
+def refresh_meta_membership(state: State, now_ts: Optional[float] = None) -> bool:
+    now_ts = _now_timestamp() if now_ts is None else float(now_ts)
+    changed = ensure_membership_schema(state, now_ts=now_ts)
+    membership = state.setdefault("membership", {})
+
+    # 本地节点直接用 runtime 真值写入 membership。
+    runtime_snapshot = get_runtime_snapshot()
+    local_entry = _new_meta_membership_entry(
+        node_id=META_NODE_ID,
+        now_ts=now_ts,
+        status="alive",
+        role=str(runtime_snapshot.get("role", "follower")),
+        current_leader_id=str(runtime_snapshot.get("current_leader_id", "")),
+        leader_epoch=max(0, _safe_int(runtime_snapshot.get("leader_epoch", 0))),
+        lamport=max(0, _safe_int(runtime_snapshot.get("lamport_clock", 0))),
+        writable_leader=is_writable_leader(),
+        source="local_runtime",
+    )
+    if membership.get(META_NODE_ID) != local_entry:
+        membership[META_NODE_ID] = local_entry
+        changed = True
+
+    # peer 节点通过探测更新；探测失败时标记 dead 并保留上次观测的 role/epoch/lamport。
+    for node_id in get_meta_peer_nodes():
+        previous_entry = _coerce_membership_entry(membership.get(node_id), now_ts, node_id=node_id)
+        peer_status = "dead"
+        peer_payload: Dict[str, Any] = {}
+        peer_source = "peer_probe_failed"
+
+        try:
+            peer_payload = _probe_meta_runtime(node_id)
+            peer_status = "alive"
+            peer_source = "peer_probe"
+        except (URLError, TimeoutError, OSError, RuntimeError, UnicodeDecodeError, json.JSONDecodeError):
+            pass
+
+        peer_entry = _new_meta_membership_entry(
+            node_id=node_id,
+            now_ts=now_ts,
+            status=peer_status,
+            role=str(peer_payload.get("role", previous_entry.get("role", "follower"))),
+            current_leader_id=str(
+                peer_payload.get(
+                    "leader",
+                    peer_payload.get("current_leader_id", previous_entry.get("current_leader_id", "")),
+                )
+            ),
+            leader_epoch=max(0, _safe_int(peer_payload.get("leader_epoch", previous_entry.get("leader_epoch", 0)))),
+            lamport=max(0, _safe_int(peer_payload.get("lamport", previous_entry.get("lamport", 0)))),
+            writable_leader=bool(peer_payload.get("writable_leader", previous_entry.get("writable_leader", False)))
+            and peer_status == "alive",
+            source=peer_source,
+        )
+        if previous_entry != peer_entry:
+            membership[node_id] = peer_entry
+            changed = True
+
+    return changed
+
+
+# 刷新完整 cluster membership：storage 心跳状态 + meta 节点状态。
+def refresh_cluster_membership(state: State, now_ts: Optional[float] = None) -> bool:
+    now_ts = _now_timestamp() if now_ts is None else float(now_ts)
+    changed = False
+    if refresh_storage_membership(state, now_ts=now_ts):
+        changed = True
+    if refresh_meta_membership(state, now_ts=now_ts):
+        changed = True
+    return changed
+
+
+# 返回 membership 快照（同时覆盖 storage 与 meta 条目）。
 def get_membership_snapshot(state: State) -> Dict[str, MembershipEntry]:
     now_ts = _now_timestamp()
     ensure_membership_schema(state, now_ts=now_ts)
@@ -257,7 +449,7 @@ def get_membership_snapshot(state: State) -> Dict[str, MembershipEntry]:
 
     out: Dict[str, MembershipEntry] = {}
     for node_id in sorted(membership.keys()):
-        out[node_id] = _coerce_membership_entry(membership.get(node_id), now_ts)
+        out[node_id] = _coerce_membership_entry(membership.get(node_id), now_ts, node_id=node_id)
     return out
 
 # lightweight health check for storage nodes
