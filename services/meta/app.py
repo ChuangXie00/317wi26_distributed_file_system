@@ -2,8 +2,14 @@ import time
 
 from fastapi import FastAPI
 
-from core.replication import push_state_to_followers, start_replication_runtime, stop_replication_runtime
-from core.runtime import get_runtime_snapshot, is_writable_leader
+from core.config import META_NODE_ID
+from core.replication import (
+    probe_cluster_leader_for_rejoin,
+    push_state_to_followers,
+    start_replication_runtime,
+    stop_replication_runtime,
+)
+from core.runtime import force_rejoin_as_follower, get_runtime_snapshot, is_writable_leader
 
 from api import router as api_router
 from repository import init_repository_schema
@@ -29,6 +35,30 @@ def startup_init_repository() -> None:
             time.sleep(sleep_sec)
     else:
         raise RuntimeError("failed to initialize postgres repository schema after retries")
+
+    # 启动前做一次重入探测：若本节点是“恢复的旧 leader”，先回归 follower，避免立即抢主。
+    rejoin_probe = probe_cluster_leader_for_rejoin()
+    if is_writable_leader() and int(rejoin_probe.get("reachable_peer_count", 0)) > 0:
+        observed_leader_id = str(rejoin_probe.get("leader_id", "")).strip().lower()
+        observed_leader_epoch = int(rejoin_probe.get("leader_epoch", 0))
+
+        # peers 报告 leader 是自己时，仍按“恢复节点默认 follower”处理，避免旧主自认定写入。
+        if observed_leader_id == META_NODE_ID:
+            observed_leader_id = ""
+
+        rejoin_reason = "startup_rejoin_observed_leader" if observed_leader_id else "startup_rejoin_peer_reachable"
+        rejoin_state = force_rejoin_as_follower(
+            reason=rejoin_reason,
+            observed_leader_id=observed_leader_id,
+            observed_leader_epoch=observed_leader_epoch if observed_leader_epoch > 0 else None,
+        )
+        print(
+            "[meta] startup rejoin applied:",
+            f"reason={rejoin_reason},",
+            f"leader={rejoin_state.get('leader_id')},",
+            f"epoch={rejoin_state.get('leader_epoch')},",
+            f"reachable_peers={rejoin_probe.get('reachable_peer_count')}",
+        )
 
     # 启动复制/接管运行时线程（leader 发送 heartbeat，follower 监控超时）。
     start_replication_runtime()

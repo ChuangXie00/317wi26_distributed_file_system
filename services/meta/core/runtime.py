@@ -260,3 +260,30 @@ def observe_leader(leader_id: str, leader_epoch: int, reason: str) -> Dict[str, 
             "leader_id": str(_RUNTIME_STATE.get("current_leader_id", "")),
             "leader_epoch": int(_RUNTIME_STATE.get("leader_epoch", 0)),
         }
+
+
+# 启动重入时强制回归 follower，避免恢复节点按旧 bootstrap 角色立即抢主。
+def force_rejoin_as_follower(reason: str, observed_leader_id: str = "", observed_leader_epoch: Optional[int] = None) -> Dict[str, Any]:
+    normalized_leader_id = str(observed_leader_id or "").strip().lower()
+    normalized_epoch = None if observed_leader_epoch is None else max(0, int(observed_leader_epoch))
+
+    with _RUNTIME_LOCK:
+        # 若探测到更高/更新任期，优先抬升 epoch，防止旧任期继续生效。
+        if normalized_epoch is not None and normalized_epoch > int(_RUNTIME_STATE.get("leader_epoch", 0)):
+            _set_epoch_unlocked(normalized_epoch, reason=f"rejoin_as_follower:{reason}")
+
+        # 若已探测到 leader，写入 leader 视图；否则清空“我是 leader”的自认定。
+        if normalized_leader_id:
+            _RUNTIME_STATE["current_leader_id"] = normalized_leader_id
+        elif str(_RUNTIME_STATE.get("current_leader_id", "")) == META_NODE_ID:
+            _RUNTIME_STATE["current_leader_id"] = ""
+
+        _set_role_unlocked("follower", reason=f"rejoin_as_follower:{reason}")
+        lamport = tick_lamport(event="rejoin_as_follower")
+        return {
+            "role": str(_RUNTIME_STATE.get("role", "follower")),
+            "leader_id": str(_RUNTIME_STATE.get("current_leader_id", "")),
+            "leader_epoch": int(_RUNTIME_STATE.get("leader_epoch", 0)),
+            "lamport": lamport,
+            "reason": str(reason),
+        }

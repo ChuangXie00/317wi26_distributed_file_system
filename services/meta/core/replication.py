@@ -109,6 +109,29 @@ def _post_json(url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
             return {}
 
 
+# 内部 HTTP JSON GET 工具，供启动期重入探测使用。
+def _get_json(url: str) -> Dict[str, Any]:
+    req = UrlRequest(url, method="GET")
+    with urlopen(req, timeout=META_INTERNAL_TIMEOUT_SEC) as resp:
+        if resp.status != 200:
+            raise RuntimeError(f"internal GET failed: status={resp.status}, url={url}")
+        raw = resp.read()
+        if not raw:
+            return {}
+        try:
+            return json.loads(raw.decode("utf-8"))
+        except json.JSONDecodeError:
+            return {}
+
+
+# 安全解析整数字段，避免远端 debug 字段异常导致启动探测中断。
+def _safe_int(raw_value: Any, default: int = 0) -> int:
+    try:
+        return int(raw_value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
 # 组合 peer URL：优先使用 META_CLUSTER_NODES 计算出的 peers；仅在无 peers 时回退 legacy 配置。
 def _peer_urls() -> List[str]:
     # 第一优先级：统一集群配置的 peer 列表。
@@ -127,6 +150,54 @@ def _peer_urls() -> List[str]:
         if clean:
             legacy_urls.append(clean)
     return legacy_urls
+
+
+# 启动重入探测：查询 peers 的 /debug/leader，尽可能识别当前集群 leader。
+def probe_cluster_leader_for_rejoin() -> Dict[str, Any]:
+    peers = get_meta_peer_urls()
+    observed_nodes: List[Dict[str, Any]] = []
+    errors: List[Dict[str, str]] = []
+    best_leader_id = ""
+    best_leader_epoch = 0
+
+    for peer_base in peers:
+        debug_url = f"{peer_base.rstrip('/')}/debug/leader"
+        try:
+            data = _get_json(debug_url)
+            peer_node_id = str(data.get("node_id", "")).strip().lower()
+            peer_role = str(data.get("role", "")).strip().lower()
+            peer_leader_id = str(data.get("leader", "")).strip().lower()
+            peer_leader_epoch = max(0, _safe_int(data.get("leader_epoch", 0)))
+
+            observed_nodes.append(
+                {
+                    "peer_base": peer_base,
+                    "node_id": peer_node_id,
+                    "role": peer_role,
+                    "leader_id": peer_leader_id,
+                    "leader_epoch": peer_leader_epoch,
+                }
+            )
+
+            if peer_leader_id:
+                # 选择规则：先看更高 epoch；同 epoch 下按 leader_id 字典序收敛。
+                if (
+                    peer_leader_epoch > best_leader_epoch
+                    or (peer_leader_epoch == best_leader_epoch and peer_leader_id > best_leader_id)
+                ):
+                    best_leader_id = peer_leader_id
+                    best_leader_epoch = peer_leader_epoch
+        except (HTTPError, URLError, OSError, RuntimeError) as exc:
+            errors.append({"peer_base": peer_base, "error": str(exc)})
+
+    return {
+        "peer_count": len(peers),
+        "reachable_peer_count": len(observed_nodes),
+        "leader_id": best_leader_id,
+        "leader_epoch": best_leader_epoch,
+        "observed_nodes": observed_nodes,
+        "errors": errors,
+    }
 
 
 # 清洗复制消息中的 membership 结构，兼容旧格式。
