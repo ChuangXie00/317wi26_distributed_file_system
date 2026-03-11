@@ -3,6 +3,8 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 
+# 文件作用：集中管理 meta 运行参数、集群成员配置与节点间 peer 发现规则。
+
 # 读取 CSV 环境变量，并清理空白项。
 def _parse_csv_env(name: str, default: str) -> List[str]:
     raw = os.getenv(name, default)
@@ -27,8 +29,38 @@ def _parse_float_env(name: str, default: float) -> float:
     return float(raw)
 
 
+# 规范化节点 ID（去空白并统一小写），避免大小写或空白导致 peer 识别不一致。
+def _normalize_meta_node_id(raw: str) -> str:
+    return str(raw).strip().lower()
+
+
+# 对字符串列表去重并保持原始顺序，避免重复节点导致重复广播。
+def _dedupe_keep_order(items: List[str]) -> List[str]:
+    out: List[str] = []
+    seen = set()
+    for item in items:
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
+
+
+# 规范化 URL 列表（去尾斜杠 + 去重），统一 legacy peer URL 表达。
+def _normalize_base_urls(urls: List[str]) -> List[str]:
+    normalized: List[str] = []
+    for raw in urls:
+        clean = str(raw).strip().rstrip("/")
+        if not clean:
+            continue
+        normalized.append(clean)
+    return _dedupe_keep_order(normalized)
+
+
 # 当前 meta 节点 ID（优先读取 META_NODE_ID，兼容旧 NODE_ID）。
-META_NODE_ID = os.getenv("META_NODE_ID", os.getenv("NODE_ID", "meta-01")).strip() or "meta-01"
+META_NODE_ID = _normalize_meta_node_id(os.getenv("META_NODE_ID", os.getenv("NODE_ID", "meta-01")))
+if not META_NODE_ID:
+    META_NODE_ID = "meta-01"
 # 启动时的初始角色，仅用于 bootstrap，后续以运行时状态为准。
 META_BOOTSTRAP_ROLE = os.getenv("META_ROLE", os.getenv("ROLE", "leader")).strip().lower() or "leader"
 if META_BOOTSTRAP_ROLE not in {"leader", "follower"}:
@@ -43,7 +75,10 @@ if LEADER_ELECTION_MODE != "bully":
     )
 
 # meta 集群节点列表（用于 election / heartbeat / replicate 广播）。
-META_CLUSTER_NODES = _parse_csv_env("META_CLUSTER_NODES", "meta-01,meta-02")
+_META_CLUSTER_NODES_RAW = [_normalize_meta_node_id(node_id) for node_id in _parse_csv_env("META_CLUSTER_NODES", "meta-01,meta-02")]
+META_CLUSTER_NODES = _dedupe_keep_order([node_id for node_id in _META_CLUSTER_NODES_RAW if node_id])
+if not META_CLUSTER_NODES:
+    META_CLUSTER_NODES = ["meta-01"]
 if META_NODE_ID not in META_CLUSTER_NODES:
     META_CLUSTER_NODES.append(META_NODE_ID)
 # meta 节点内部 HTTP 端口（容器内服务端口）。
@@ -57,7 +92,9 @@ def build_meta_base_url(node_id: str) -> str:
 
 # 返回除当前节点外的 peer 节点 ID。
 def get_meta_peer_nodes() -> List[str]:
-    return [node_id for node_id in META_CLUSTER_NODES if node_id != META_NODE_ID]
+    # 统一按字典序输出，保证广播顺序和 debug 观测稳定可复现。
+    peers = [node_id for node_id in META_CLUSTER_NODES if node_id != META_NODE_ID]
+    return sorted(peers)
 
 
 # 返回除当前节点外的 peer 节点 base URL。
@@ -96,7 +133,7 @@ PG_CONNECT_TIMEOUT_SEC = _parse_int_env("PG_CONNECT_TIMEOUT_SEC", 5)
 PG_STATEMENT_TIMEOUT_MS = _parse_int_env("PG_STATEMENT_TIMEOUT_MS", 8000)
 
 # 0.1p04 历史配置兼容项；p5 主要以 META_CLUSTER_NODES 为准。
-META_FOLLOWER_URLS = _parse_csv_env("META_FOLLOWER_URLS", "")
+META_FOLLOWER_URLS = _normalize_base_urls(_parse_csv_env("META_FOLLOWER_URLS", ""))
 META_LEADER_URL = os.getenv("META_LEADER_URL", "http://meta-01:8000").strip().rstrip("/")
 META_INTERNAL_TIMEOUT_SEC = _parse_float_env("META_INTERNAL_TIMEOUT_SEC", 2.0)
 META_HEARTBEAT_INTERVAL_SEC = _parse_float_env("META_HEARTBEAT_INTERVAL_SEC", 3.0)

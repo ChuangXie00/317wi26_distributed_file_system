@@ -109,24 +109,24 @@ def _post_json(url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
             return {}
 
 
-# 组合 peer URL，优先 cluster 配置，并兼容旧版 META_FOLLOWER_URLS。
+# 组合 peer URL：优先使用 META_CLUSTER_NODES 计算出的 peers；仅在无 peers 时回退 legacy 配置。
 def _peer_urls() -> List[str]:
-    urls: List[str] = []
-    seen = set()
-
+    # 第一优先级：统一集群配置的 peer 列表。
+    cluster_urls: List[str] = []
     for url in get_meta_peer_urls():
         clean = str(url).strip().rstrip("/")
-        if clean and clean not in seen:
-            seen.add(clean)
-            urls.append(clean)
+        if clean:
+            cluster_urls.append(clean)
+    if cluster_urls:
+        return cluster_urls
 
+    # 兼容兜底：若未配置集群 peers，则回退 0.1p04 的 META_FOLLOWER_URLS。
+    legacy_urls: List[str] = []
     for url in META_FOLLOWER_URLS:
         clean = str(url).strip().rstrip("/")
-        if clean and clean not in seen:
-            seen.add(clean)
-            urls.append(clean)
-
-    return urls
+        if clean:
+            legacy_urls.append(clean)
+    return legacy_urls
 
 
 # 清洗复制消息中的 membership 结构，兼容旧格式。
