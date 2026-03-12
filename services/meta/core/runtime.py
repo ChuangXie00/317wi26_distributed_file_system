@@ -32,11 +32,18 @@ def _normalize_role(raw_role: str) -> str:
     return "follower"
 
 
+# 中文：规范化节点 ID，用于投票记录与 leader 标识字段统一格式。
+def _normalize_node_id(raw_node_id: str) -> str:
+    return str(raw_node_id or "").strip().lower()
+
+
 # 初始化角色；仅用于进程启动 bootstrap，后续以运行时变更为准。
 _INITIAL_ROLE = _normalize_role(META_BOOTSTRAP_ROLE)
 # 初始化 leader 与 epoch，leader 默认以 epoch=1 启动。
 _INITIAL_LEADER_ID = META_NODE_ID if _INITIAL_ROLE == "leader" else ""
 _INITIAL_EPOCH = 1 if _INITIAL_ROLE == "leader" else 0
+# 中文：在 quorum 尚未接入前，term 默认跟随 epoch 初始化，保持语义兼容。
+_INITIAL_TERM = _INITIAL_EPOCH
 
 
 # 统一保存 Phase5 关键运行时字段，供 fencing/debug/election 共用。
@@ -46,6 +53,10 @@ _RUNTIME_STATE: Dict[str, Any] = {
     "role": _INITIAL_ROLE,
     "current_leader_id": _INITIAL_LEADER_ID,
     "leader_epoch": _INITIAL_EPOCH,
+    # 中文：quorum 任期号；当前阶段先与 leader_epoch 对齐，后续由 quorum 投票链路驱动。
+    "current_term": _INITIAL_TERM,
+    # 中文：当前任期内本节点已投票对象（空字符串表示尚未投票）。
+    "voted_for": "",
     "lamport_clock": 0,
     "last_lamport_event": "",
     "last_lamport_at": "",
@@ -56,6 +67,12 @@ _RUNTIME_STATE: Dict[str, Any] = {
     "last_role_change_reason": "bootstrap",
     "last_epoch_change_at": _now_iso(),
     "last_epoch_change_reason": "bootstrap",
+    # 中文：term 变更审计信息，便于追踪任期推进来源。
+    "last_term_change_at": _now_iso(),
+    "last_term_change_reason": "bootstrap",
+    # 中文：投票变更审计信息，便于排查 quorum 投票行为。
+    "last_vote_change_at": "",
+    "last_vote_change_reason": "",
     # 记录最近一次“我让位给更高优先级节点”的观测信息，便于排查三节点选举抖动。
     "last_election_deferred_at": "",
     "last_election_deferred_reason": "",
@@ -111,6 +128,18 @@ def get_leader_epoch() -> int:
         return int(_RUNTIME_STATE.get("leader_epoch", 0))
 
 
+# 中文：读取当前任期（term），供 quorum 选主链路使用。
+def get_current_term() -> int:
+    with _RUNTIME_LOCK:
+        return int(_RUNTIME_STATE.get("current_term", 0))
+
+
+# 中文：读取当前任期内的投票对象；空字符串表示尚未投票。
+def get_voted_for() -> str:
+    with _RUNTIME_LOCK:
+        return str(_RUNTIME_STATE.get("voted_for", ""))
+
+
 # 判断当前节点是否可处理写请求（仅“我就是 leader”才放行）。
 def is_writable_leader() -> bool:
     with _RUNTIME_LOCK:
@@ -139,6 +168,35 @@ def _set_epoch_unlocked(epoch: int, reason: str) -> bool:
     _RUNTIME_STATE["leader_epoch"] = normalized
     _RUNTIME_STATE["last_epoch_change_at"] = _now_iso()
     _RUNTIME_STATE["last_epoch_change_reason"] = str(reason)
+    # 中文：在 Bully/旧路径下保持 term 与 epoch 同步，避免双时间轴漂移。
+    _set_term_unlocked(normalized, reason=f"sync_with_epoch:{reason}")
+    return True
+
+
+# 中文：在锁内更新 term；仅允许非递减推进，防止旧任期回退覆盖。
+def _set_term_unlocked(term: int, reason: str, *, allow_same: bool = True) -> bool:
+    normalized = max(0, int(term))
+    current_term = int(_RUNTIME_STATE.get("current_term", 0))
+    if normalized < current_term:
+        return False
+    if normalized == current_term and not allow_same:
+        return False
+    if normalized == current_term and allow_same:
+        return True
+    _RUNTIME_STATE["current_term"] = normalized
+    _RUNTIME_STATE["last_term_change_at"] = _now_iso()
+    _RUNTIME_STATE["last_term_change_reason"] = str(reason)
+    return True
+
+
+# 中文：在锁内记录本任期投票对象；用于 quorum 的“一任期一票”约束。
+def _set_voted_for_unlocked(voted_for: str, reason: str) -> bool:
+    normalized_voted_for = _normalize_node_id(voted_for)
+    if str(_RUNTIME_STATE.get("voted_for", "")) == normalized_voted_for:
+        return False
+    _RUNTIME_STATE["voted_for"] = normalized_voted_for
+    _RUNTIME_STATE["last_vote_change_at"] = _now_iso()
+    _RUNTIME_STATE["last_vote_change_reason"] = str(reason)
     return True
 
 
@@ -178,6 +236,67 @@ def mark_last_applied_lamport(lamport: int, reason: str) -> bool:
         _RUNTIME_STATE["last_applied_lamport_at"] = _now_iso()
         _RUNTIME_STATE["last_applied_lamport_reason"] = str(reason)
         return True
+
+
+# 中文：观测到更高任期时推进 term，并按需同步 epoch（用于后续 quorum 入站处理）。
+def observe_term(term: int, reason: str, *, sync_epoch: bool = True, reset_voted_for: bool = True) -> Dict[str, Any]:
+    normalized_term = max(0, int(term))
+    with _RUNTIME_LOCK:
+        before_term = int(_RUNTIME_STATE.get("current_term", 0))
+        before_epoch = int(_RUNTIME_STATE.get("leader_epoch", 0))
+        changed = False
+        ignored = False
+
+        if normalized_term < before_term:
+            ignored = True
+        else:
+            if _set_term_unlocked(normalized_term, reason=f"observe_term:{reason}", allow_same=False):
+                changed = True
+                if reset_voted_for:
+                    _set_voted_for_unlocked("", reason=f"term_advanced_reset_vote:{reason}")
+            if sync_epoch and normalized_term > before_epoch:
+                if _set_epoch_unlocked(normalized_term, reason=f"observe_term_sync_epoch:{reason}"):
+                    changed = True
+
+        return {
+            "changed": changed,
+            "ignored": ignored,
+            "term": int(_RUNTIME_STATE.get("current_term", 0)),
+            "leader_epoch": int(_RUNTIME_STATE.get("leader_epoch", 0)),
+            "voted_for": str(_RUNTIME_STATE.get("voted_for", "")),
+        }
+
+
+# 中文：记录当前任期的投票对象；允许传空字符串清票。
+def mark_voted_for(voted_for: str, reason: str, term: Optional[int] = None) -> Dict[str, Any]:
+    normalized_voted_for = _normalize_node_id(voted_for)
+    with _RUNTIME_LOCK:
+        requested_term = None if term is None else max(0, int(term))
+        current_term = int(_RUNTIME_STATE.get("current_term", 0))
+        stale_term = False
+        term_changed = False
+
+        if requested_term is not None:
+            if requested_term < current_term:
+                stale_term = True
+            elif requested_term > current_term:
+                if _set_term_unlocked(requested_term, reason=f"vote_term:{reason}", allow_same=False):
+                    term_changed = True
+                _set_epoch_unlocked(requested_term, reason=f"vote_term_sync_epoch:{reason}")
+                _set_voted_for_unlocked("", reason=f"vote_term_reset_vote:{reason}")
+
+        vote_changed = False
+        if not stale_term:
+            vote_changed = _set_voted_for_unlocked(normalized_voted_for, reason=f"mark_voted_for:{reason}")
+
+        return {
+            "stale_term": stale_term,
+            "term_changed": term_changed,
+            "vote_changed": vote_changed,
+            "term": int(_RUNTIME_STATE.get("current_term", 0)),
+            "leader_epoch": int(_RUNTIME_STATE.get("leader_epoch", 0)),
+            "voted_for": str(_RUNTIME_STATE.get("voted_for", "")),
+        }
 
 
 # 进入 candidate 轮次，epoch 自增并清空当前 leader。
