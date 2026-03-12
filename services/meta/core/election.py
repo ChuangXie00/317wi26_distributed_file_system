@@ -51,6 +51,12 @@ def _known_meta_nodes() -> List[str]:
     return sorted(set(get_meta_peer_nodes() + [META_NODE_ID]))
 
 
+# 中文：计算当前集群所需法定票数（quorum），规则为 floor(N/2)+1。
+def _quorum_required(total_nodes: int) -> int:
+    normalized_total = max(1, int(total_nodes))
+    return (normalized_total // 2) + 1
+
+
 # 选主策略抽象接口；Phase 5.0 当前仅实现 Bully。
 class ElectionStrategy(Protocol):
     # 中文：触发本节点发起一轮选主流程，返回本轮执行结果。
@@ -235,11 +241,102 @@ class BullyElectionStrategy:
         }
 
 
-# Quorum 策略占位实现；Phase 5.2 后续提交将补齐多数投票链路。
+# Quorum 策略实现；通过 vote 请求统计多数票并在达 quorum 时晋升 leader。
 class QuorumElectionStrategy:
-    # 中文：当前提交仅完成策略拆分，不在此提交启用 quorum 具体逻辑。
+    # 中文：发起 quorum 选举：候选节点先自投票，再向 peers 请求投票，达到多数后当选 leader。
     def trigger_election(self, reason: str) -> Dict[str, Any]:
-        raise RuntimeError("quorum election is not implemented in this commit")
+        round_info = begin_election_round(reason=reason)
+        candidate_epoch = int(round_info["epoch"])
+        candidate_term = max(candidate_epoch, get_current_term())
+        local_vote = mark_voted_for(
+            voted_for=META_NODE_ID,
+            reason=f"quorum_self_vote:{reason}",
+            term=candidate_term,
+        )
+
+        peer_nodes = get_meta_peer_nodes()
+        total_nodes = len(peer_nodes) + 1
+        quorum = _quorum_required(total_nodes)
+
+        granted_nodes: List[str] = [META_NODE_ID]
+        rejected_nodes: List[Dict[str, str]] = []
+        failed_nodes: List[Dict[str, str]] = []
+        max_observed_term = int(local_vote.get("term", candidate_term))
+
+        for peer_node_id in peer_nodes:
+            req_lamport = tick_lamport(event="send_vote_request")
+            payload = {
+                "candidate_id": META_NODE_ID,
+                "candidate_term": candidate_term,
+                "candidate_epoch": candidate_epoch,
+                "lamport": req_lamport,
+                "reason": reason,
+            }
+            peer_url = f"{build_meta_base_url(peer_node_id)}/internal/vote"
+            try:
+                resp = _post_json(peer_url, payload)
+                tick_lamport(event="recv_vote_response", incoming_lamport=int(resp.get("lamport", 0)))
+
+                responder_term = max(0, int(resp.get("responder_term", 0)))
+                max_observed_term = max(max_observed_term, responder_term)
+                if bool(resp.get("granted", False)):
+                    granted_nodes.append(peer_node_id)
+                else:
+                    rejected_nodes.append(
+                        {
+                            "node_id": peer_node_id,
+                            "detail": str(resp.get("detail", "")),
+                            "supported": str(bool(resp.get("supported", False))).lower(),
+                        }
+                    )
+            except (HTTPError, URLError, OSError, RuntimeError, json.JSONDecodeError) as exc:
+                failed_nodes.append({"node_id": peer_node_id, "error": str(exc)})
+
+        granted_votes = len(granted_nodes)
+        if granted_votes >= quorum:
+            # 中文：满足多数票后晋升 leader，并沿用既有 coordinator 广播链路收敛全局视图。
+            promote_info = promote_self_to_leader(epoch=candidate_epoch, reason=f"quorum_win:{reason}")
+            coordinator_lamport = tick_lamport(event="send_coordinator")
+            broadcast_result = broadcast_coordinator(
+                leader_id=META_NODE_ID,
+                leader_epoch=int(promote_info["leader_epoch"]),
+                lamport=coordinator_lamport,
+                reason=f"quorum_win:{reason}",
+            )
+            return {
+                "status": "elected",
+                "reason": reason,
+                "leader_id": META_NODE_ID,
+                "leader_epoch": int(promote_info["leader_epoch"]),
+                "candidate_term": candidate_term,
+                "quorum_required": quorum,
+                "granted_votes": granted_votes,
+                "granted_nodes": sorted(set(granted_nodes)),
+                "rejected_nodes": rejected_nodes,
+                "failed_nodes": failed_nodes,
+                "max_observed_term": max_observed_term,
+                "broadcast": broadcast_result,
+            }
+
+        # 中文：未达到法定票数则结束本轮，回退 follower，等待下一次 timeout/触发重试。
+        defer_state = mark_election_deferred(
+            epoch=candidate_epoch,
+            reason=f"quorum_not_reached:{reason}",
+            defer_to_nodes=granted_nodes,
+        )
+        return {
+            "status": "deferred",
+            "reason": reason,
+            "candidate_term": candidate_term,
+            "candidate_epoch": candidate_epoch,
+            "quorum_required": quorum,
+            "granted_votes": granted_votes,
+            "granted_nodes": sorted(set(granted_nodes)),
+            "rejected_nodes": rejected_nodes,
+            "failed_nodes": failed_nodes,
+            "max_observed_term": max_observed_term,
+            "defer_state": defer_state,
+        }
 
     # 中文：当前提交仅保留接口占位，避免在接入前误用 quorum 入站处理。
     def handle_incoming_election(
@@ -249,7 +346,19 @@ class QuorumElectionStrategy:
         lamport: int,
         reason: str,
     ) -> Dict[str, Any]:
-        raise RuntimeError("quorum incoming election handler is not implemented in this commit")
+        tick_lamport(event="recv_legacy_election_in_quorum", incoming_lamport=int(lamport))
+        # 中文：quorum 模式不处理 Bully election 请求，返回“可忽略”的稳定响应，避免 500 噪音。
+        resp_lamport = tick_lamport(event="send_legacy_election_ack_in_quorum")
+        return {
+            "status": "ok",
+            "ok": False,
+            "stale": True,
+            "should_start_local_election": False,
+            "responder_id": META_NODE_ID,
+            "responder_role": get_node_role(),
+            "responder_epoch": get_leader_epoch(),
+            "lamport": resp_lamport,
+        }
 
     # 中文：quorum 投票请求处理骨架；本提交先打通协议字段与授票约束，选举主流程在后续提交完善。
     def handle_incoming_vote_request(
