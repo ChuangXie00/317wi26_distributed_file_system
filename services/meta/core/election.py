@@ -293,6 +293,34 @@ class QuorumElectionStrategy:
                 failed_nodes.append({"node_id": peer_node_id, "error": str(exc)})
 
         granted_votes = len(granted_nodes)
+        if max_observed_term > candidate_term:
+            # 中文：若观测到更高 term，即使当前已拿到票也必须让位，避免旧 term 误当选。
+            observe_term(
+                term=max_observed_term,
+                reason=f"quorum_higher_term_observed:{reason}",
+                sync_epoch=True,
+                reset_voted_for=True,
+            )
+            defer_state = mark_election_deferred(
+                epoch=max(candidate_epoch, max_observed_term),
+                reason=f"quorum_higher_term_observed:{reason}",
+                defer_to_nodes=granted_nodes,
+            )
+            return {
+                "status": "deferred",
+                "reason": reason,
+                "candidate_term": candidate_term,
+                "candidate_epoch": candidate_epoch,
+                "quorum_required": quorum,
+                "granted_votes": granted_votes,
+                "granted_nodes": sorted(set(granted_nodes)),
+                "rejected_nodes": rejected_nodes,
+                "failed_nodes": failed_nodes,
+                "max_observed_term": max_observed_term,
+                "stale_term_guard": True,
+                "defer_state": defer_state,
+            }
+
         if granted_votes >= quorum:
             # 中文：满足多数票后晋升 leader，并沿用既有 coordinator 广播链路收敛全局视图。
             promote_info = promote_self_to_leader(epoch=candidate_epoch, reason=f"quorum_win:{reason}")
@@ -360,7 +388,7 @@ class QuorumElectionStrategy:
             "lamport": resp_lamport,
         }
 
-    # 中文：quorum 投票请求处理骨架；本提交先打通协议字段与授票约束，选举主流程在后续提交完善。
+    # 中文：处理 quorum 投票请求；对旧 term 拒绝授票，对新 term 先降级再按“一任期一票”授票。
     def handle_incoming_vote_request(
         self,
         candidate_id: str,
@@ -393,7 +421,7 @@ class QuorumElectionStrategy:
         detail = ""
 
         if stale:
-            detail = "stale_or_unknown_candidate"
+            detail = "stale_or_unknown_candidate_or_term"
         elif current_voted_for and current_voted_for != normalized_candidate_id:
             detail = f"already_voted_for:{current_voted_for}"
         else:

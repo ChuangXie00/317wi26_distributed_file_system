@@ -200,6 +200,25 @@ def _set_voted_for_unlocked(voted_for: str, reason: str) -> bool:
     return True
 
 
+# 中文：本地观测到更高 term 时统一执行降级逻辑，避免旧 leader/candidate 继续参与写入或选举。
+def _step_down_on_higher_term_unlocked(term: int, reason: str, *, sync_epoch: bool = True, reset_voted_for: bool = True) -> bool:
+    normalized_term = max(0, int(term))
+    current_term = int(_RUNTIME_STATE.get("current_term", 0))
+    if normalized_term <= current_term:
+        return False
+
+    _set_term_unlocked(normalized_term, reason=f"higher_term:{reason}", allow_same=False)
+    if sync_epoch and normalized_term > int(_RUNTIME_STATE.get("leader_epoch", 0)):
+        _set_epoch_unlocked(normalized_term, reason=f"higher_term_sync_epoch:{reason}")
+
+    # 中文：进入新 term 后清空旧 leader 视图，等待后续 heartbeat/coordinator 收敛新的 leader。
+    _RUNTIME_STATE["current_leader_id"] = ""
+    _set_role_unlocked("follower", reason=f"higher_term_step_down:{reason}")
+    if reset_voted_for:
+        _set_voted_for_unlocked("", reason=f"higher_term_reset_vote:{reason}")
+    return True
+
+
 # 推进 Lamport 逻辑时钟；收到远端时钟时先做 max，再 +1。
 def tick_lamport(event: str, incoming_lamport: Optional[int] = None) -> int:
     with _RUNTIME_LOCK:
@@ -243,24 +262,28 @@ def observe_term(term: int, reason: str, *, sync_epoch: bool = True, reset_voted
     normalized_term = max(0, int(term))
     with _RUNTIME_LOCK:
         before_term = int(_RUNTIME_STATE.get("current_term", 0))
-        before_epoch = int(_RUNTIME_STATE.get("leader_epoch", 0))
         changed = False
         ignored = False
+        stepped_down = False
 
         if normalized_term < before_term:
             ignored = True
         else:
-            if _set_term_unlocked(normalized_term, reason=f"observe_term:{reason}", allow_same=False):
+            if _step_down_on_higher_term_unlocked(
+                term=normalized_term,
+                reason=f"observe_term:{reason}",
+                sync_epoch=sync_epoch,
+                reset_voted_for=reset_voted_for,
+            ):
                 changed = True
-                if reset_voted_for:
-                    _set_voted_for_unlocked("", reason=f"term_advanced_reset_vote:{reason}")
-            if sync_epoch and normalized_term > before_epoch:
-                if _set_epoch_unlocked(normalized_term, reason=f"observe_term_sync_epoch:{reason}"):
-                    changed = True
+                stepped_down = True
 
         return {
             "changed": changed,
             "ignored": ignored,
+            "stepped_down": stepped_down,
+            "role": str(_RUNTIME_STATE.get("role", "follower")),
+            "leader_id": str(_RUNTIME_STATE.get("current_leader_id", "")),
             "term": int(_RUNTIME_STATE.get("current_term", 0)),
             "leader_epoch": int(_RUNTIME_STATE.get("leader_epoch", 0)),
             "voted_for": str(_RUNTIME_STATE.get("voted_for", "")),
@@ -275,15 +298,20 @@ def mark_voted_for(voted_for: str, reason: str, term: Optional[int] = None) -> D
         current_term = int(_RUNTIME_STATE.get("current_term", 0))
         stale_term = False
         term_changed = False
+        stepped_down = False
 
         if requested_term is not None:
             if requested_term < current_term:
                 stale_term = True
             elif requested_term > current_term:
-                if _set_term_unlocked(requested_term, reason=f"vote_term:{reason}", allow_same=False):
+                if _step_down_on_higher_term_unlocked(
+                    term=requested_term,
+                    reason=f"vote_term:{reason}",
+                    sync_epoch=True,
+                    reset_voted_for=True,
+                ):
                     term_changed = True
-                _set_epoch_unlocked(requested_term, reason=f"vote_term_sync_epoch:{reason}")
-                _set_voted_for_unlocked("", reason=f"vote_term_reset_vote:{reason}")
+                    stepped_down = True
 
         vote_changed = False
         if not stale_term:
@@ -292,7 +320,10 @@ def mark_voted_for(voted_for: str, reason: str, term: Optional[int] = None) -> D
         return {
             "stale_term": stale_term,
             "term_changed": term_changed,
+            "stepped_down": stepped_down,
             "vote_changed": vote_changed,
+            "role": str(_RUNTIME_STATE.get("role", "follower")),
+            "leader_id": str(_RUNTIME_STATE.get("current_leader_id", "")),
             "term": int(_RUNTIME_STATE.get("current_term", 0)),
             "leader_epoch": int(_RUNTIME_STATE.get("leader_epoch", 0)),
             "voted_for": str(_RUNTIME_STATE.get("voted_for", "")),
