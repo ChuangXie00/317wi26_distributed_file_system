@@ -57,6 +57,32 @@ def _normalize_base_urls(urls: List[str]) -> List[str]:
     return _dedupe_keep_order(normalized)
 
 
+# 中文：当前版本允许的选主模式，后续可在此处集中扩展。
+SUPPORTED_LEADER_ELECTION_MODES = {"bully", "quorum"}
+
+
+# 中文：校验选主模式是否合法；非法模式在启动阶段直接 fail-fast。
+def _validate_leader_election_mode(raw_mode: str) -> str:
+    normalized_mode = str(raw_mode or "").strip().lower() or "bully"
+    if normalized_mode not in SUPPORTED_LEADER_ELECTION_MODES:
+        supported = ", ".join(sorted(SUPPORTED_LEADER_ELECTION_MODES))
+        raise RuntimeError(
+            f"unsupported LEADER_ELECTION_MODE={normalized_mode!r}, supported modes: {supported}"
+        )
+    return normalized_mode
+
+
+# 中文：quorum 模式预检查，防止少于 3 节点时误启动造成不可达多数票。
+def _validate_quorum_cluster_precheck(election_mode: str, cluster_nodes: List[str]) -> None:
+    if election_mode != "quorum":
+        return
+    if len(cluster_nodes) < 3:
+        raise RuntimeError(
+            "quorum election requires at least 3 meta nodes, "
+            f"got {len(cluster_nodes)} from META_CLUSTER_NODES={cluster_nodes!r}"
+        )
+
+
 # 当前 meta 节点 ID（优先读取 META_NODE_ID，兼容旧 NODE_ID）。
 META_NODE_ID = _normalize_meta_node_id(os.getenv("META_NODE_ID", os.getenv("NODE_ID", "meta-01")))
 if not META_NODE_ID:
@@ -66,13 +92,8 @@ META_BOOTSTRAP_ROLE = os.getenv("META_ROLE", os.getenv("ROLE", "leader")).strip(
 if META_BOOTSTRAP_ROLE not in {"leader", "follower"}:
     META_BOOTSTRAP_ROLE = "follower"
 
-# 选主模式配置；0.1p5.0 仅允许 bully，其他模式直接失败（fail fast）。
-LEADER_ELECTION_MODE = os.getenv("LEADER_ELECTION_MODE", "bully").strip().lower() or "bully"
-if LEADER_ELECTION_MODE != "bully":
-    raise RuntimeError(
-        f"unsupported LEADER_ELECTION_MODE={LEADER_ELECTION_MODE!r}, "
-        "phase 0.1p5.0 only supports 'bully'"
-    )
+# 中文：选主模式配置，当前支持 bully / quorum 两种模式。
+LEADER_ELECTION_MODE = _validate_leader_election_mode(os.getenv("LEADER_ELECTION_MODE", "bully"))
 
 # meta 集群节点列表（用于 election / heartbeat / replicate 广播）。
 _META_CLUSTER_NODES_RAW = [_normalize_meta_node_id(node_id) for node_id in _parse_csv_env("META_CLUSTER_NODES", "meta-01,meta-02")]
@@ -81,6 +102,10 @@ if not META_CLUSTER_NODES:
     META_CLUSTER_NODES = ["meta-01"]
 if META_NODE_ID not in META_CLUSTER_NODES:
     META_CLUSTER_NODES.append(META_NODE_ID)
+# 中文：当前节点感知到的 meta 集群规模，供启动校验与调试复用。
+META_CLUSTER_SIZE = len(META_CLUSTER_NODES)
+# 中文：在配置加载阶段执行 quorum 最小规模校验。
+_validate_quorum_cluster_precheck(LEADER_ELECTION_MODE, META_CLUSTER_NODES)
 # meta 节点内部 HTTP 端口（容器内服务端口）。
 META_INTERNAL_PORT = _parse_int_env("META_INTERNAL_PORT", 8000)
 
