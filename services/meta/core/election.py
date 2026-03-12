@@ -423,7 +423,22 @@ class QuorumElectionStrategy:
         if stale:
             detail = "stale_or_unknown_candidate_or_term"
         elif current_voted_for and current_voted_for != normalized_candidate_id:
-            detail = f"already_voted_for:{current_voted_for}"
+            # 中文：同任期发生双 candidate 对撞时，允许“已给自己投票”的低优先级节点让票给更高优先级 candidate，避免长期平票不收敛。
+            can_preempt_self_vote = bool(
+                normalized_term == current_term
+                and current_voted_for == META_NODE_ID
+                and normalized_candidate_id > META_NODE_ID
+            )
+            if can_preempt_self_vote:
+                vote_result = mark_voted_for(
+                    voted_for=normalized_candidate_id,
+                    reason=f"incoming_vote_request_preempt_self:{reason}",
+                    term=normalized_term,
+                )
+                granted = not bool(vote_result.get("stale_term", False))
+                detail = "vote_granted_preempt_self_vote" if granted else "stale_term"
+            else:
+                detail = f"already_voted_for:{current_voted_for}"
         else:
             vote_result = mark_voted_for(
                 voted_for=normalized_candidate_id,

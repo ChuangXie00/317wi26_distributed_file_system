@@ -8,6 +8,8 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request as UrlRequest, urlopen
 
 from .config import (
+    LEADER_ELECTION_MODE,
+    META_CLUSTER_NODES,
     META_FOLLOWER_URLS,
     META_HEARTBEAT_INTERVAL_SEC,
     META_INTERNAL_TIMEOUT_SEC,
@@ -81,6 +83,24 @@ _RUNTIME: Dict[str, Any] = {
 # 统一 UTC 时间格式，便于日志和 debug 输出对齐。
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+# 中文：quorum 模式下按节点顺序施加确定性超时偏移，打破同周期 timeout 导致的重复平票/抖动。
+def _quorum_timeout_offset_sec() -> float:
+    if LEADER_ELECTION_MODE != "quorum":
+        return 0.0
+
+    normalized_nodes = sorted({str(node_id).strip().lower() for node_id in META_CLUSTER_NODES if str(node_id).strip()})
+    if not normalized_nodes:
+        return 0.0
+
+    try:
+        node_index = normalized_nodes.index(META_NODE_ID)
+    except ValueError:
+        node_index = 0
+
+    # 中文：按 3.5s 级差错开，确保在 3s 轮询粒度下进入不同选举窗口。
+    return float(node_index) * 3.5
 
 
 # 更新复制运行时状态字段。
@@ -477,7 +497,9 @@ def _maybe_takeover_by_timeout() -> None:
 
     reference_ts = last_ts if last_ts > 0 else started_ts
     elapsed = max(0.0, time.time() - reference_ts)
-    if elapsed <= META_LEADER_HEARTBEAT_TIMEOUT_SEC:
+    # 中文：quorum 模式使用“基础超时 + 节点偏移”作为生效阈值，避免多节点同拍触发选举。
+    effective_timeout_sec = float(META_LEADER_HEARTBEAT_TIMEOUT_SEC + _quorum_timeout_offset_sec())
+    if elapsed <= effective_timeout_sec:
         return
 
     # 中文：重入冷却期内不执行 timeout takeover，优先等待 leader 心跳恢复。
@@ -489,7 +511,7 @@ def _maybe_takeover_by_timeout() -> None:
     if last_takeover_ts > 0 and (time.time() - last_takeover_ts) < 1.5:
         return
 
-    trigger_takeover(reason=f"leader_timeout_{round(elapsed, 3)}s")
+    trigger_takeover(reason=f"leader_timeout_{round(elapsed, 3)}s_threshold_{round(effective_timeout_sec, 3)}s")
 
 
 # 统一后台循环：leader 负责发送 heartbeat+sync；follower 负责超时接管。
