@@ -172,6 +172,11 @@ def _normalize_meta_role(raw_role: str) -> str:
     return "follower"
 
 
+# 中文：规范化 voted_for 字段，统一节点 ID 表达并兼容空值。
+def _normalize_meta_voted_for(raw_voted_for: str) -> str:
+    return str(raw_voted_for or "").strip().lower()
+
+
 # 生成标准 membership 条目（storage 默认结构）。
 def _new_membership_entry(now_ts: float, status: str = "alive", node_type: str = "storage") -> MembershipEntry:
     return {
@@ -190,6 +195,8 @@ def _new_meta_membership_entry(
     role: str = "follower",
     current_leader_id: str = "",
     leader_epoch: int = 0,
+    current_term: int = 0,
+    voted_for: str = "",
     lamport: int = 0,
     writable_leader: bool = False,
     source: str = "meta_runtime",
@@ -200,6 +207,10 @@ def _new_meta_membership_entry(
             "role": _normalize_meta_role(role),
             "current_leader_id": str(current_leader_id or "").strip().lower(),
             "leader_epoch": max(0, int(leader_epoch)),
+            # 中文：quorum 任期号，优先使用 current_term；历史数据回落到 leader_epoch。
+            "current_term": max(0, int(current_term)),
+            # 中文：quorum 当前任期已投票对象（空字符串表示未投票）。
+            "voted_for": _normalize_meta_voted_for(voted_for),
             "lamport": max(0, int(lamport)),
             "writable_leader": bool(writable_leader),
             "source": str(source or "").strip() or "meta_runtime",
@@ -234,6 +245,7 @@ def _coerce_membership_entry(raw: Any, now_ts: float, node_id: str = "") -> Memb
             hb_at = _timestamp_to_iso(hb_ts)
 
         if node_type == "meta":
+            normalized_term = max(0, _safe_int(raw.get("current_term", raw.get("term", raw.get("leader_epoch", 0)))))
             return {
                 "node_type": "meta",
                 "status": status,
@@ -242,6 +254,8 @@ def _coerce_membership_entry(raw: Any, now_ts: float, node_id: str = "") -> Memb
                 "role": _normalize_meta_role(raw.get("role", "follower")),
                 "current_leader_id": str(raw.get("current_leader_id", raw.get("leader", ""))).strip().lower(),
                 "leader_epoch": max(0, _safe_int(raw.get("leader_epoch", 0))),
+                "current_term": normalized_term,
+                "voted_for": _normalize_meta_voted_for(raw.get("voted_for", "")),
                 "lamport": max(0, _safe_int(raw.get("lamport", 0))),
                 "writable_leader": bool(raw.get("writable_leader", False)),
                 "source": str(raw.get("source", "meta_membership")).strip() or "meta_membership",
@@ -384,6 +398,8 @@ def refresh_meta_membership(state: State, now_ts: Optional[float] = None) -> boo
         role=str(runtime_snapshot.get("role", "follower")),
         current_leader_id=str(runtime_snapshot.get("current_leader_id", "")),
         leader_epoch=max(0, _safe_int(runtime_snapshot.get("leader_epoch", 0))),
+        current_term=max(0, _safe_int(runtime_snapshot.get("current_term", runtime_snapshot.get("leader_epoch", 0)))),
+        voted_for=str(runtime_snapshot.get("voted_for", "")),
         lamport=max(0, _safe_int(runtime_snapshot.get("lamport_clock", 0))),
         writable_leader=is_writable_leader(),
         source="local_runtime",
@@ -392,7 +408,7 @@ def refresh_meta_membership(state: State, now_ts: Optional[float] = None) -> boo
         membership[META_NODE_ID] = local_entry
         changed = True
 
-    # peer 节点通过探测更新；探测失败时标记 dead 并保留上次观测的 role/epoch/lamport。
+    # peer 节点通过探测更新；探测失败时标记 dead 并保留上次观测的 role/epoch/term/lamport。
     for node_id in get_meta_peer_nodes():
         previous_entry = _coerce_membership_entry(membership.get(node_id), now_ts, node_id=node_id)
         peer_status = "dead"
@@ -418,6 +434,16 @@ def refresh_meta_membership(state: State, now_ts: Optional[float] = None) -> boo
                 )
             ),
             leader_epoch=max(0, _safe_int(peer_payload.get("leader_epoch", previous_entry.get("leader_epoch", 0)))),
+            current_term=max(
+                0,
+                _safe_int(
+                    peer_payload.get(
+                        "current_term",
+                        peer_payload.get("term", previous_entry.get("current_term", previous_entry.get("leader_epoch", 0))),
+                    )
+                ),
+            ),
+            voted_for=str(peer_payload.get("voted_for", previous_entry.get("voted_for", ""))),
             lamport=max(0, _safe_int(peer_payload.get("lamport", previous_entry.get("lamport", 0)))),
             writable_leader=bool(peer_payload.get("writable_leader", previous_entry.get("writable_leader", False)))
             and peer_status == "alive",
