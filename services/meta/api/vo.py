@@ -118,6 +118,30 @@ class ElectionResp(BaseModel):
     lamport: int = Field(default=0, ge=0)
 
 
+# quorum 投票请求体（candidate 向 peer 请求投票）。
+class VoteReq(BaseModel):
+    candidate_id: str = Field(..., min_length=1)
+    candidate_term: int = Field(default=0, ge=0)
+    candidate_epoch: int = Field(default=0, ge=0)
+    lamport: int = Field(default=0, ge=0)
+    reason: str = "vote_request"
+
+
+# quorum 投票响应体（granted=true 表示本节点已投票给该 candidate）。
+class VoteResp(BaseModel):
+    status: Literal["ok"]
+    granted: bool
+    stale: bool
+    supported: bool
+    responder_id: str
+    responder_role: str
+    responder_term: int = Field(default=0, ge=0)
+    responder_epoch: int = Field(default=0, ge=0)
+    voted_for: str = ""
+    lamport: int = Field(default=0, ge=0)
+    detail: str = ""
+
+
 # coordinator 广播请求体。
 class CoordinatorReq(BaseModel):
     leader_id: str = Field(..., min_length=1)

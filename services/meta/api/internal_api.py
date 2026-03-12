@@ -3,7 +3,7 @@ from typing import Dict
 from fastapi import APIRouter, HTTPException
 
 from core.config import HEARTBEAT_WRITE_MIN_INTERVAL_SEC, META_NODE_ID, STORAGE_NODES
-from core.election import handle_incoming_coordinator, handle_incoming_election
+from core.election import handle_incoming_coordinator, handle_incoming_election, handle_incoming_vote_request
 from core.replication import (
     apply_replicated_state,
     build_state_snapshot,
@@ -30,6 +30,8 @@ from .vo import (
     ReplicateStateResp,
     StorageHeartbeatReq,
     StorageHeartbeatResp,
+    VoteReq,
+    VoteResp,
 )
 
 router = APIRouter()
@@ -102,6 +104,19 @@ def internal_election(req: ElectionReq) -> ElectionResp:
         # 异步发起本地 election，避免阻塞当前内部请求。
         trigger_takeover_async(reason=f"bully_preempt_from_{req.candidate_id}")
     return ElectionResp(**result)
+
+
+@router.post("/internal/vote", response_model=VoteResp)
+def internal_vote(req: VoteReq) -> VoteResp:
+    # 中文：处理 quorum 投票请求；当前提交先打通请求/响应协议，具体多数票选举在后续提交完善。
+    result = handle_incoming_vote_request(
+        candidate_id=req.candidate_id,
+        candidate_term=req.candidate_term,
+        candidate_epoch=req.candidate_epoch,
+        lamport=req.lamport,
+        reason=req.reason,
+    )
+    return VoteResp(**result)
 
 
 @router.post("/internal/coordinator", response_model=CoordinatorResp)

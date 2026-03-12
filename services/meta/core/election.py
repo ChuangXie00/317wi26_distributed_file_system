@@ -13,12 +13,16 @@ from .config import (
 from .runtime import (
     begin_election_round,
     get_current_leader_id,
+    get_current_term,
     get_leader_epoch,
     get_node_role,
     get_rejoin_election_holdoff,
+    get_voted_for,
     mark_election_deferred,
+    mark_voted_for,
     observe_candidate_epoch,
     observe_leader,
+    observe_term,
     promote_self_to_leader,
     tick_lamport,
 )
@@ -57,6 +61,17 @@ class ElectionStrategy(Protocol):
     def handle_incoming_election(
         self,
         candidate_id: str,
+        candidate_epoch: int,
+        lamport: int,
+        reason: str,
+    ) -> Dict[str, Any]:
+        ...
+
+    # 中文：处理投票请求（quorum 协议），返回是否授票及响应方状态。
+    def handle_incoming_vote_request(
+        self,
+        candidate_id: str,
+        candidate_term: int,
         candidate_epoch: int,
         lamport: int,
         reason: str,
@@ -194,6 +209,31 @@ class BullyElectionStrategy:
             "lamport": resp_lamport,
         }
 
+    # 中文：Bully 模式下不参与 quorum 投票，返回协议级“已处理但不支持”。
+    def handle_incoming_vote_request(
+        self,
+        candidate_id: str,
+        candidate_term: int,
+        candidate_epoch: int,
+        lamport: int,
+        reason: str,
+    ) -> Dict[str, Any]:
+        tick_lamport(event="recv_vote_request_unsupported", incoming_lamport=int(lamport))
+        resp_lamport = tick_lamport(event="send_vote_response_unsupported")
+        return {
+            "status": "ok",
+            "granted": False,
+            "stale": True,
+            "supported": False,
+            "responder_id": META_NODE_ID,
+            "responder_role": get_node_role(),
+            "responder_term": get_current_term(),
+            "responder_epoch": get_leader_epoch(),
+            "voted_for": get_voted_for(),
+            "lamport": resp_lamport,
+            "detail": "vote_protocol_disabled_in_bully_mode",
+        }
+
 
 # Quorum 策略占位实现；Phase 5.2 后续提交将补齐多数投票链路。
 class QuorumElectionStrategy:
@@ -210,6 +250,73 @@ class QuorumElectionStrategy:
         reason: str,
     ) -> Dict[str, Any]:
         raise RuntimeError("quorum incoming election handler is not implemented in this commit")
+
+    # 中文：quorum 投票请求处理骨架；本提交先打通协议字段与授票约束，选举主流程在后续提交完善。
+    def handle_incoming_vote_request(
+        self,
+        candidate_id: str,
+        candidate_term: int,
+        candidate_epoch: int,
+        lamport: int,
+        reason: str,
+    ) -> Dict[str, Any]:
+        normalized_candidate_id = _normalize_node_id(candidate_id)
+        normalized_term = max(0, int(candidate_term))
+        normalized_epoch = max(0, int(candidate_epoch))
+        known_nodes = _known_meta_nodes()
+
+        tick_lamport(event="recv_vote_request", incoming_lamport=int(lamport))
+        observe_term(
+            term=normalized_term,
+            reason=f"incoming_vote_request:{reason}",
+            sync_epoch=True,
+            reset_voted_for=True,
+        )
+
+        current_term = get_current_term()
+        current_voted_for = _normalize_node_id(get_voted_for())
+        stale = bool(
+            normalized_candidate_id not in known_nodes
+            or normalized_candidate_id == META_NODE_ID
+            or normalized_term < current_term
+        )
+        granted = False
+        detail = ""
+
+        if stale:
+            detail = "stale_or_unknown_candidate"
+        elif current_voted_for and current_voted_for != normalized_candidate_id:
+            detail = f"already_voted_for:{current_voted_for}"
+        else:
+            vote_result = mark_voted_for(
+                voted_for=normalized_candidate_id,
+                reason=f"incoming_vote_request:{reason}",
+                term=normalized_term,
+            )
+            granted = not bool(vote_result.get("stale_term", False))
+            detail = "vote_granted" if granted else "stale_term"
+
+        # 中文：若 candidate 透传了更高 epoch，保守抬升本地 epoch，防止旧视图写入路径延迟收敛。
+        if normalized_epoch > get_leader_epoch():
+            observe_candidate_epoch(
+                candidate_epoch=normalized_epoch,
+                reason=f"incoming_vote_request_epoch:{reason}",
+            )
+
+        resp_lamport = tick_lamport(event="send_vote_response")
+        return {
+            "status": "ok",
+            "granted": granted,
+            "stale": stale,
+            "supported": True,
+            "responder_id": META_NODE_ID,
+            "responder_role": get_node_role(),
+            "responder_term": get_current_term(),
+            "responder_epoch": get_leader_epoch(),
+            "voted_for": get_voted_for(),
+            "lamport": resp_lamport,
+            "detail": detail,
+        }
 
 
 # 中文：策略工厂映射，统一管理不同选主模式对应的策略实现。
@@ -261,6 +368,24 @@ def handle_incoming_election(candidate_id: str, candidate_epoch: int, lamport: i
     strategy = get_election_strategy()
     return strategy.handle_incoming_election(
         candidate_id=candidate_id,
+        candidate_epoch=candidate_epoch,
+        lamport=lamport,
+        reason=reason,
+    )
+
+
+# 处理收到的 quorum vote 请求；用于 candidate 统计多数票结果。
+def handle_incoming_vote_request(
+    candidate_id: str,
+    candidate_term: int,
+    candidate_epoch: int,
+    lamport: int,
+    reason: str,
+) -> Dict[str, Any]:
+    strategy = get_election_strategy()
+    return strategy.handle_incoming_vote_request(
+        candidate_id=candidate_id,
+        candidate_term=candidate_term,
         candidate_epoch=candidate_epoch,
         lamport=lamport,
         reason=reason,
