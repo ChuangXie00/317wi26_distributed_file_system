@@ -19,6 +19,7 @@ from ..runtime import (
 from .common import known_meta_nodes, normalize_node_id, quorum_required
 from .coordinator import broadcast_coordinator
 from .transport import post_json
+from .vote_rules import decide_incoming_vote, decide_quorum_round_outcome
 
 
 # Quorum 策略实现；通过 vote 请求统计多数票并在达 quorum 时晋升 leader。
@@ -73,7 +74,13 @@ class QuorumElectionStrategy:
                 failed_nodes.append({"node_id": peer_node_id, "error": str(exc)})
 
         granted_votes = len(granted_nodes)
-        if max_observed_term > candidate_term:
+        round_outcome = decide_quorum_round_outcome(
+            candidate_term=candidate_term,
+            max_observed_term=max_observed_term,
+            granted_votes=granted_votes,
+            quorum=quorum,
+        )
+        if round_outcome == "defer_higher_term":
             # 中文：若观测到更高 term，即使当前已拿到票也必须让位，避免旧 term 误当选。
             observe_term(
                 term=max_observed_term,
@@ -101,7 +108,7 @@ class QuorumElectionStrategy:
                 "defer_state": defer_state,
             }
 
-        if granted_votes >= quorum:
+        if round_outcome == "elected":
             # 中文：满足多数票后晋升 leader，并沿用既有 coordinator 广播链路收敛全局视图。
             promote_info = promote_self_to_leader(epoch=candidate_epoch, reason=f"quorum_win:{reason}")
             coordinator_lamport = tick_lamport(event="send_coordinator")
@@ -192,41 +199,31 @@ class QuorumElectionStrategy:
 
         current_term = get_current_term()
         current_voted_for = normalize_node_id(get_voted_for())
-        stale = bool(
-            normalized_candidate_id not in known_nodes
-            or normalized_candidate_id == META_NODE_ID
-            or normalized_term < current_term
+        decision = decide_incoming_vote(
+            self_node_id=META_NODE_ID,
+            candidate_id=normalized_candidate_id,
+            candidate_term=normalized_term,
+            current_term=current_term,
+            current_voted_for=current_voted_for,
+            candidate_known=normalized_candidate_id in known_nodes,
         )
+        stale = bool(decision.get("stale", False))
         granted = False
-        detail = ""
+        detail = str(decision.get("detail", ""))
 
-        if stale:
-            detail = "stale_or_unknown_candidate_or_term"
-        elif current_voted_for and current_voted_for != normalized_candidate_id:
-            # 中文：同任期发生双 candidate 对撞时，允许“已给自己投票”的低优先级节点让票给更高优先级 candidate，避免长期平票不收敛。
-            can_preempt_self_vote = bool(
-                normalized_term == current_term
-                and current_voted_for == META_NODE_ID
-                and normalized_candidate_id > META_NODE_ID
-            )
-            if can_preempt_self_vote:
-                vote_result = mark_voted_for(
-                    voted_for=normalized_candidate_id,
-                    reason=f"incoming_vote_request_preempt_self:{reason}",
-                    term=normalized_term,
-                )
-                granted = not bool(vote_result.get("stale_term", False))
-                detail = "vote_granted_preempt_self_vote" if granted else "stale_term"
-            else:
-                detail = f"already_voted_for:{current_voted_for}"
-        else:
+        if bool(decision.get("should_record_vote", False)):
             vote_result = mark_voted_for(
-                voted_for=normalized_candidate_id,
-                reason=f"incoming_vote_request:{reason}",
+                voted_for=str(decision.get("vote_for", "")),
+                reason=f"{str(decision.get('vote_reason', 'incoming_vote_request'))}:{reason}",
                 term=normalized_term,
             )
             granted = not bool(vote_result.get("stale_term", False))
-            detail = "vote_granted" if granted else "stale_term"
+            if bool(vote_result.get("stale_term", False)):
+                detail = "stale_term"
+            elif bool(decision.get("precheck_granted", False)):
+                detail = str(decision.get("detail", "vote_granted"))
+        else:
+            granted = bool(decision.get("precheck_granted", False))
 
         # 中文：若 candidate 透传了更高 epoch，保守抬升本地 epoch，防止旧视图写入路径延迟收敛。
         if normalized_epoch > get_leader_epoch():
