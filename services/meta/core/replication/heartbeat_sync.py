@@ -1,39 +1,28 @@
 import copy
 import json
-import threading
 import time
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 from urllib.error import HTTPError, URLError
 from urllib.request import Request as UrlRequest, urlopen
 
-from .config import (
-    LEADER_ELECTION_MODE,
-    META_CLUSTER_NODES,
+from ..config import (
     META_FOLLOWER_URLS,
-    META_HEARTBEAT_INTERVAL_SEC,
     META_INTERNAL_TIMEOUT_SEC,
-    META_LEADER_HEARTBEAT_TIMEOUT_SEC,
-    META_LEADER_URL,
     META_NODE_ID,
-    META_SYNC_INTERVAL_SEC,
     get_meta_peer_urls,
 )
-from .election import trigger_election
-from .runtime import (
+from ..runtime import (
     get_current_leader_id,
     get_lamport_clock,
     get_last_applied_lamport,
     get_leader_epoch,
     get_node_role,
-    get_rejoin_election_holdoff,
-    get_runtime_snapshot,
     is_writable_leader,
     mark_last_applied_lamport,
     observe_leader,
     tick_lamport,
 )
-from .state import (
+from ..state import (
     State,
     get_membership_snapshot,
     load_state,
@@ -41,77 +30,7 @@ from .state import (
     persist_state,
     refresh_cluster_membership,
 )
-
-
-# 复制运行时锁，保护 debug 状态字典与线程句柄。
-_RUNTIME_LOCK = threading.RLock()
-# 主循环停止信号。
-_STOP_EVENT = threading.Event()
-# 复制/接管统一后台线程句柄。
-_RUNTIME_THREAD: Optional[threading.Thread] = None
-# 选主互斥锁，避免并发触发多轮 election。
-_ELECTION_LOCK = threading.Lock()
-
-
-# 保存复制、心跳、接管过程中的观测数据，供 /debug/replication 查询。
-_RUNTIME: Dict[str, Any] = {
-    "started_ts": time.time(),
-    "last_heartbeat_sent_at": "",
-    "last_heartbeat_success_at": "",
-    "last_snapshot_sent_at": "",
-    "last_snapshot_success_at": "",
-    "last_error": "",
-    "last_error_at": "",
-    "last_leader_heartbeat_at": "",
-    "last_leader_heartbeat_from": "",
-    "last_leader_heartbeat_epoch": 0,
-    "last_leader_heartbeat_lamport": 0,
-    "last_leader_heartbeat_ts": 0.0,
-    "last_sync_applied_at": "",
-    "last_sync_source": "",
-    "last_sync_reason": "",
-    "last_sync_lamport": 0,
-    "last_takeover_at": "",
-    "last_takeover_reason": "",
-    "last_takeover_result": "",
-    "last_takeover_ts": 0.0,
-    "last_takeover_detail": {},
-    "election_in_progress": False,
-}
-
-
-# 统一 UTC 时间格式，便于日志和 debug 输出对齐。
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-# 中文：quorum 模式下按节点顺序施加确定性超时偏移，打破同周期 timeout 导致的重复平票/抖动。
-def _quorum_timeout_offset_sec() -> float:
-    if LEADER_ELECTION_MODE != "quorum":
-        return 0.0
-
-    normalized_nodes = sorted({str(node_id).strip().lower() for node_id in META_CLUSTER_NODES if str(node_id).strip()})
-    if not normalized_nodes:
-        return 0.0
-
-    try:
-        node_index = normalized_nodes.index(META_NODE_ID)
-    except ValueError:
-        node_index = 0
-
-    # 中文：按 3.5s 级差错开，确保在 3s 轮询粒度下进入不同选举窗口。
-    return float(node_index) * 3.5
-
-
-# 更新复制运行时状态字段。
-def _update_runtime(**fields: Any) -> None:
-    with _RUNTIME_LOCK:
-        _RUNTIME.update(fields)
-
-
-# 记录运行异常，避免静默失败。
-def _record_error(msg: str) -> None:
-    _update_runtime(last_error=str(msg), last_error_at=_now_iso())
+from .state_store import now_iso, record_error, update_runtime
 
 
 # 内部 HTTP JSON POST 工具，供 heartbeat/replicate/election 使用。
@@ -253,7 +172,7 @@ def build_state_snapshot(reason: str = "manual") -> Dict[str, Any]:
         "leader_id": get_current_leader_id() or META_NODE_ID,
         "leader_epoch": get_leader_epoch(),
         "lamport": lamport,
-        "generated_at": _now_iso(),
+        "generated_at": now_iso(),
         "reason": reason,
         "membership": get_membership_snapshot(state),
     }
@@ -269,7 +188,7 @@ def push_state_to_followers(reason: str = "manual") -> Dict[str, Any]:
         return {"status": "skipped", "reason": "no peer configured", "attempted": 0, "succeeded": 0, "failed": []}
 
     snapshot = build_state_snapshot(reason=reason)
-    _update_runtime(last_snapshot_sent_at=_now_iso())
+    update_runtime(last_snapshot_sent_at=now_iso())
 
     failed: List[Dict[str, str]] = []
     success_count = 0
@@ -278,10 +197,10 @@ def push_state_to_followers(reason: str = "manual") -> Dict[str, Any]:
             resp = _post_json(f"{peer_base}/internal/replicate_state", snapshot)
             tick_lamport(event="recv_replicate_ack", incoming_lamport=int(resp.get("lamport", 0)))
             success_count += 1
-            _update_runtime(last_snapshot_success_at=_now_iso())
+            update_runtime(last_snapshot_success_at=now_iso())
         except (HTTPError, URLError, OSError, RuntimeError) as exc:
             failed.append({"peer": peer_base, "error": str(exc)})
-            _record_error(f"replicate_state failed to {peer_base}: {exc}")
+            record_error(f"replicate_state failed to {peer_base}: {exc}")
 
     return {
         "status": "ok",
@@ -294,7 +213,7 @@ def push_state_to_followers(reason: str = "manual") -> Dict[str, Any]:
 
 # 记录 leader 心跳并按 epoch 执行降级（fencing）。
 def record_leader_heartbeat(leader_id: str, leader_epoch: int, lamport: int) -> Dict[str, Any]:
-    observed_at = _now_iso()
+    observed_at = now_iso()
     tick_lamport(event="recv_leader_heartbeat", incoming_lamport=max(0, int(lamport)))
     observe_result = observe_leader(
         leader_id=str(leader_id).strip(),
@@ -304,7 +223,7 @@ def record_leader_heartbeat(leader_id: str, leader_epoch: int, lamport: int) -> 
 
     # 只有“未被忽略”的心跳才刷新超时计时器，避免旧 epoch 心跳干扰 takeover。
     if not bool(observe_result.get("ignored", False)):
-        _update_runtime(
+        update_runtime(
             last_leader_heartbeat_at=observed_at,
             last_leader_heartbeat_from=str(leader_id).strip(),
             last_leader_heartbeat_epoch=max(0, int(leader_epoch)),
@@ -334,7 +253,7 @@ def apply_replicated_state(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     if bool(observe_result.get("ignored", False)):
         return {
             "status": "ignored",
-            "applied_at": _now_iso(),
+            "applied_at": now_iso(),
             "changed": False,
             "detail": f"stale epoch replicate_state ignored: incoming_epoch={leader_epoch}",
             "lamport": get_lamport_clock(),
@@ -342,14 +261,14 @@ def apply_replicated_state(snapshot: Dict[str, Any]) -> Dict[str, Any]:
 
     last_applied = get_last_applied_lamport()
     if incoming_lamport <= last_applied:
-        _update_runtime(
+        update_runtime(
             last_sync_source=source_node_id,
             last_sync_reason=f"ignored_stale_lamport:{reason}",
             last_sync_lamport=incoming_lamport,
         )
         return {
             "status": "ignored",
-            "applied_at": _now_iso(),
+            "applied_at": now_iso(),
             "changed": False,
             "detail": f"stale replicate_state lamport={incoming_lamport}, last_applied={last_applied}",
             "lamport": get_lamport_clock(),
@@ -370,8 +289,8 @@ def apply_replicated_state(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     mutate_state(_mutator)
     mark_last_applied_lamport(incoming_lamport, reason=f"replicate_state:{reason}")
 
-    applied_at = _now_iso()
-    _update_runtime(
+    applied_at = now_iso()
+    update_runtime(
         last_sync_applied_at=applied_at,
         last_sync_source=source_node_id,
         last_sync_reason=reason,
@@ -395,8 +314,8 @@ def _send_heartbeat_to_peers() -> None:
     if not peers:
         return
 
-    sent_at = _now_iso()
-    _update_runtime(last_heartbeat_sent_at=sent_at)
+    sent_at = now_iso()
+    update_runtime(last_heartbeat_sent_at=sent_at)
     for peer_base in peers:
         lamport = tick_lamport(event="send_leader_heartbeat")
         payload = {
@@ -417,189 +336,6 @@ def _send_heartbeat_to_peers() -> None:
                     leader_epoch=ack_leader_epoch,
                     reason="heartbeat_ack_fencing",
                 )
-            _update_runtime(last_heartbeat_success_at=_now_iso())
+            update_runtime(last_heartbeat_success_at=now_iso())
         except (HTTPError, URLError, OSError, RuntimeError) as exc:
-            _record_error(f"leader heartbeat failed to {peer_base}: {exc}")
-
-
-# 执行一次 takeover 流程（超时触发或内部预抢占触发）。
-def trigger_takeover(reason: str) -> Dict[str, Any]:
-    # 中文：重入冷却期内拒绝本地主动选举，避免恢复节点立即抢主。
-    rejoin_holdoff = get_rejoin_election_holdoff()
-    if bool(rejoin_holdoff.get("active", False)):
-        skipped_result = {
-            "status": "skipped",
-            "reason": "rejoin_election_holdoff",
-            "takeover_reason": str(reason),
-            "holdoff_remaining_sec": float(rejoin_holdoff.get("remaining_sec", 0.0)),
-            "holdoff_until": str(rejoin_holdoff.get("until", "")),
-            "holdoff_source_reason": str(rejoin_holdoff.get("source_reason", "")),
-        }
-        _update_runtime(
-            last_takeover_at=_now_iso(),
-            last_takeover_reason=reason,
-            last_takeover_result="skipped_rejoin_holdoff",
-            last_takeover_ts=time.time(),
-            last_takeover_detail=copy.deepcopy(skipped_result),
-        )
-        return skipped_result
-
-    acquired = _ELECTION_LOCK.acquire(blocking=False)
-    if not acquired:
-        return {"status": "skipped", "reason": "election already in progress"}
-
-    _update_runtime(election_in_progress=True)
-    try:
-        if is_writable_leader():
-            return {"status": "skipped", "reason": "node is already writable leader"}
-
-        result = trigger_election(reason=reason)
-        _update_runtime(
-            last_takeover_at=_now_iso(),
-            last_takeover_reason=reason,
-            last_takeover_result=str(result.get("status", "unknown")),
-            last_takeover_ts=time.time(),
-            last_takeover_detail=copy.deepcopy(result),
-        )
-
-        # 当选后立即推送一次状态，尽快收敛 follower 视图。
-        if is_writable_leader():
-            push_state_to_followers(reason="takeover_elected")
-        return result
-    except Exception as exc:  # pragma: no cover - 防御性兜底
-        _record_error(f"trigger takeover failed: {exc}")
-        return {"status": "error", "reason": reason, "error": str(exc)}
-    finally:
-        _update_runtime(election_in_progress=False)
-        _ELECTION_LOCK.release()
-
-
-# 异步触发 takeover，避免在 API 线程内阻塞。
-def trigger_takeover_async(reason: str) -> None:
-    def _runner() -> None:
-        trigger_takeover(reason=reason)
-
-    thread = threading.Thread(target=_runner, name="meta-takeover", daemon=True)
-    thread.start()
-
-
-# follower/candidate 周期检查 leader 心跳超时，超时后触发 election。
-def _maybe_takeover_by_timeout() -> None:
-    runtime_snapshot = get_runtime_snapshot()
-    role = str(runtime_snapshot.get("role", "follower"))
-    if role == "leader":
-        return
-
-    with _RUNTIME_LOCK:
-        last_ts = float(_RUNTIME.get("last_leader_heartbeat_ts", 0.0) or 0.0)
-        started_ts = float(_RUNTIME.get("started_ts", time.time()))
-        last_takeover_ts = float(_RUNTIME.get("last_takeover_ts", 0.0) or 0.0)
-
-    reference_ts = last_ts if last_ts > 0 else started_ts
-    elapsed = max(0.0, time.time() - reference_ts)
-    # 中文：quorum 模式使用“基础超时 + 节点偏移”作为生效阈值，避免多节点同拍触发选举。
-    effective_timeout_sec = float(META_LEADER_HEARTBEAT_TIMEOUT_SEC + _quorum_timeout_offset_sec())
-    if elapsed <= effective_timeout_sec:
-        return
-
-    # 中文：重入冷却期内不执行 timeout takeover，优先等待 leader 心跳恢复。
-    rejoin_holdoff = get_rejoin_election_holdoff()
-    if bool(rejoin_holdoff.get("active", False)):
-        return
-
-    # 简单冷却窗口，避免连续 timeout 触发过于频繁。
-    if last_takeover_ts > 0 and (time.time() - last_takeover_ts) < 1.5:
-        return
-
-    trigger_takeover(reason=f"leader_timeout_{round(elapsed, 3)}s_threshold_{round(effective_timeout_sec, 3)}s")
-
-
-# 统一后台循环：leader 负责发送 heartbeat+sync；follower 负责超时接管。
-def _replication_runtime_loop() -> None:
-    hb_interval = max(0.5, float(META_HEARTBEAT_INTERVAL_SEC))
-    sync_interval = max(hb_interval, float(META_SYNC_INTERVAL_SEC))
-    next_sync_monotonic = 0.0
-
-    while not _STOP_EVENT.is_set():
-        if is_writable_leader():
-            _send_heartbeat_to_peers()
-            now_monotonic = time.monotonic()
-            if now_monotonic >= next_sync_monotonic:
-                push_state_to_followers(reason="periodic_sync")
-                next_sync_monotonic = now_monotonic + sync_interval
-        else:
-            _maybe_takeover_by_timeout()
-
-        _STOP_EVENT.wait(hb_interval)
-
-
-# 启动复制/接管运行时线程。
-def start_replication_runtime() -> None:
-    global _RUNTIME_THREAD
-    with _RUNTIME_LOCK:
-        if _RUNTIME_THREAD is not None and _RUNTIME_THREAD.is_alive():
-            return
-        _STOP_EVENT.clear()
-        _RUNTIME["started_ts"] = time.time()
-        _RUNTIME_THREAD = threading.Thread(target=_replication_runtime_loop, name="meta-replication-runtime", daemon=True)
-        _RUNTIME_THREAD.start()
-
-
-# 停止复制/接管运行时线程。
-def stop_replication_runtime() -> None:
-    global _RUNTIME_THREAD
-    _STOP_EVENT.set()
-    if _RUNTIME_THREAD is not None and _RUNTIME_THREAD.is_alive():
-        _RUNTIME_THREAD.join(timeout=2.0)
-    _RUNTIME_THREAD = None
-
-
-# 输出复制与接管状态，供 debug API 观测真实 leader/runtime 信息。
-def get_replication_status() -> Dict[str, Any]:
-    with _RUNTIME_LOCK:
-        data = copy.deepcopy(_RUNTIME)
-        thread_alive = _RUNTIME_THREAD.is_alive() if _RUNTIME_THREAD is not None else False
-
-    last_ts = float(data.get("last_leader_heartbeat_ts", 0.0) or 0.0)
-    elapsed_sec = max(0.0, time.time() - last_ts) if last_ts > 0 else None
-    leader_alive = (elapsed_sec is not None) and (elapsed_sec <= META_LEADER_HEARTBEAT_TIMEOUT_SEC)
-    runtime_snapshot = get_runtime_snapshot()
-
-    return {
-        "node_id": META_NODE_ID,
-        "runtime": runtime_snapshot,
-        "runtime_thread_alive": thread_alive,
-        "peer_urls": _peer_urls(),
-        "legacy_leader_url": META_LEADER_URL,
-        "leader_heartbeat": {
-            "source_node_id": data.get("last_leader_heartbeat_from", ""),
-            "leader_epoch": int(data.get("last_leader_heartbeat_epoch", 0)),
-            "leader_lamport": int(data.get("last_leader_heartbeat_lamport", 0)),
-            "last_observed_at": data.get("last_leader_heartbeat_at", ""),
-            "elapsed_sec": round(elapsed_sec, 3) if elapsed_sec is not None else None,
-            "timeout_sec": META_LEADER_HEARTBEAT_TIMEOUT_SEC,
-            "alive": bool(leader_alive),
-        },
-        "replication": {
-            "last_heartbeat_sent_at": data.get("last_heartbeat_sent_at", ""),
-            "last_heartbeat_success_at": data.get("last_heartbeat_success_at", ""),
-            "last_snapshot_sent_at": data.get("last_snapshot_sent_at", ""),
-            "last_snapshot_success_at": data.get("last_snapshot_success_at", ""),
-            "last_sync_applied_at": data.get("last_sync_applied_at", ""),
-            "last_sync_source": data.get("last_sync_source", ""),
-            "last_sync_reason": data.get("last_sync_reason", ""),
-            "last_sync_lamport": int(data.get("last_sync_lamport", 0)),
-            "last_applied_lamport": int(runtime_snapshot.get("last_applied_lamport", 0)),
-        },
-        "takeover": {
-            "last_takeover_at": data.get("last_takeover_at", ""),
-            "last_takeover_reason": data.get("last_takeover_reason", ""),
-            "last_takeover_result": data.get("last_takeover_result", ""),
-            "last_takeover_detail": data.get("last_takeover_detail", {}),
-            "election_in_progress": bool(data.get("election_in_progress", False)),
-        },
-        "error": {
-            "last_error": data.get("last_error", ""),
-            "last_error_at": data.get("last_error_at", ""),
-        },
-    }
+            record_error(f"leader heartbeat failed to {peer_base}: {exc}")
