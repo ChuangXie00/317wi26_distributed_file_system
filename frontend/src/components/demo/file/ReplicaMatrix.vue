@@ -1,20 +1,34 @@
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 import { fetchDemoFileReplicas } from '../../../api/demoApi.js'
+import { useFilePanelStore } from '../../../stores/filePanelStore'
 
-const fileNameInput = ref('')
+const filePanelStore = useFilePanelStore()
+
 const isLoading = ref(false)
 const rows = ref([])
 const currentFileName = ref('')
 const statusKind = ref('idle')
-const statusMessage = ref('输入文件名后点击 load matrix。')
+const statusMessage = ref('select a file on the left to load replica matrix.')
 
-const canLoad = computed(() => Boolean(fileNameInput.value.trim()) && !isLoading.value)
+const selectedFileName = computed(() => filePanelStore.state.selectedFileName)
 
-async function onLoadMatrix() {
-  const targetName = fileNameInput.value.trim()
+watch(
+  () => filePanelStore.state.selectionVersion,
+  async () => {
+    await loadMatrixForSelection()
+  },
+  { immediate: true }
+)
+
+async function loadMatrixForSelection() {
+  const targetName = String(selectedFileName.value || '').trim()
   if (!targetName) {
+    rows.value = []
+    currentFileName.value = ''
+    statusKind.value = 'idle'
+    statusMessage.value = 'select a file on the left to load replica matrix.'
     return
   }
 
@@ -30,7 +44,7 @@ async function onLoadMatrix() {
     statusMessage.value = `matrix loaded: chunks=${result.chunk_count ?? rows.value.length}`
   } catch (error) {
     rows.value = []
-    currentFileName.value = ''
+    currentFileName.value = targetName
     statusKind.value = 'error'
     statusMessage.value = `load failed: ${error?.code || ''} ${error?.message || 'unknown error'}`
   } finally {
@@ -51,24 +65,13 @@ function shortFingerprint(value) {
   <article class="panel">
     <header class="panel__head">
       <h3 class="panel__title">Replica Matrix</h3>
-      <span class="panel__meta">Commit 12: live chunk replicas</span>
+      <span class="panel__meta">linked with selected file</span>
     </header>
     <div class="panel__body subgrid">
-      <label class="replica__label">
-        File Name
-        <input v-model="fileNameInput" class="replica__input" type="text" placeholder="commit11_smoke.txt" />
-      </label>
-
-      <div class="btn-row">
-        <button type="button" class="btn" :disabled="!canLoad" @click="onLoadMatrix">
-          {{ isLoading ? 'loading...' : 'load matrix' }}
-        </button>
-      </div>
-
       <p class="empty-state" :class="{ 'replica__status--error': statusKind === 'error' }">{{ statusMessage }}</p>
 
       <div v-if="rows.length" class="replica__table-wrap">
-        <p class="panel__meta">file={{ currentFileName }}</p>
+        <p class="panel__meta">file={{ currentFileName }} <span v-if="isLoading">(refreshing...)</span></p>
         <table class="table">
           <thead>
             <tr>
@@ -93,23 +96,6 @@ function shortFingerprint(value) {
 </template>
 
 <style scoped>
-.replica__label {
-  display: grid;
-  gap: 6px;
-  font-size: 0.78rem;
-  color: var(--ink-soft);
-}
-
-.replica__input {
-  width: 100%;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 7px 10px;
-  background: rgba(255, 255, 255, 0.9);
-  color: var(--ink-0);
-  font-size: 0.82rem;
-}
-
 .replica__status--error {
   border-color: rgba(196, 63, 84, 0.3);
   background: rgba(196, 63, 84, 0.08);

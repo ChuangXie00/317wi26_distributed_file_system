@@ -133,3 +133,17 @@ export function fetchDemoFileReplicas({ fileName, signal } = {}) {
   params.set('file_name', String(fileName || '').trim())
   return requestDemo(`/file/replicas?${params.toString()}`, { signal })
 }
+
+export function fetchDemoFileList({ limit = 200, signal } = {}) {
+  const params = new URLSearchParams()
+  params.set('limit', String(Math.max(1, Math.min(1000, Number(limit) || 200))))
+  return requestDemo(`/file/list?${params.toString()}`, { signal })
+}
+
+export function deleteDemoFile({ fileName, signal } = {}) {
+  const encoded = encodeURIComponent(String(fileName || '').trim())
+  return requestDemo(`/file/${encoded}`, {
+    method: 'DELETE',
+    signal
+  })
+}
