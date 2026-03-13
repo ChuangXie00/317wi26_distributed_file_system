@@ -21,14 +21,30 @@ services:
 
   # entry for host access: localhost:8000 -> meta-entry -> meta-leader
   meta-entry:
-    image: nginx:alpine
+    build:
+      context: ..
+      dockerfile: deploy/meta-entry/Dockerfile
     container_name: meta-entry
     ports:
       - "8000:8000"
-    volumes: 
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    environment:
+      # 0.1p5.3：entry 轮询 meta 集群统一 leader 出口，实现自动切主。
+      - ENTRY_META_NODES=meta-01,meta-02,meta-03
+      - ENTRY_META_INTERNAL_PORT=8000
+      - ENTRY_LEADER_QUERY_PATH=/internal/current_leader
+      # 0.1p5.3：防抖 + 冷却，避免频繁切主导致入口抖动。
+      - ENTRY_REFRESH_INTERVAL_SEC=1.5
+      - ENTRY_SWITCH_DEBOUNCE_SEC=2.0
+      - ENTRY_SWITCH_COOLDOWN_SEC=6.0
+      - ENTRY_REQUEST_TIMEOUT_SEC=1.2
+      - ENTRY_DEFAULT_LEADER_ID=meta-01
+      - ENTRY_UPSTREAM_CONF_PATH=/etc/nginx/conf.d/meta_upstream.conf
+      - ENTRY_STATUS_PATH=/var/lib/meta-entry/debug/entry_status.json
+      - ENTRY_ENABLE_NGINX_RELOAD=1
     depends_on:
       - meta-01
+      - meta-02
+      - meta-03
     networks:
       - dfs-net
 
