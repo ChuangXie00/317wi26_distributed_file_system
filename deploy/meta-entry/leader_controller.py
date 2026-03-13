@@ -63,6 +63,7 @@ class ControllerConfig:
     switch_cooldown_sec: float
     request_timeout_sec: float
     require_single_writable_leader: bool
+    switch_history_limit: int
     # 默认目标与动态配置落盘路径。
     default_leader_id: str
     upstream_conf_path: str
@@ -105,6 +106,8 @@ class ControllerConfig:
             # 开启后，entry 仅在“唯一可写 leader”成立时才允许切换。
             require_single_writable_leader=str(os.getenv("ENTRY_REQUIRE_SINGLE_WRITABLE_LEADER", "0")).strip().lower()
             in {"1", "true", "yes", "on"},
+            # 仅保留最近 N 次切换历史，避免状态文件无限增长。
+            switch_history_limit=max(1, safe_int(os.getenv("ENTRY_SWITCH_HISTORY_LIMIT", "30"), 30)),
             default_leader_id=default_leader or meta_nodes[0],
             upstream_conf_path=str(os.getenv("ENTRY_UPSTREAM_CONF_PATH", "/etc/nginx/conf.d/meta_upstream.conf")).strip()
             or "/etc/nginx/conf.d/meta_upstream.conf",
@@ -131,6 +134,11 @@ class LeaderSwitchController:
         self.last_decision = "bootstrap"
         self.last_error = ""
         self.poll_seq = 0
+        # p53 回归指标：切换次数、抖动次数、最近切换耗时与历史。
+        self.switch_count = 0
+        self.flap_count = 0
+        self.last_switch_latency_sec = 0.0
+        self.switch_history: List[Dict[str, Any]] = []
 
         # 启动时尽量复用上次状态，避免重启后立即误切。
         self._load_previous_status()
@@ -180,6 +188,12 @@ class LeaderSwitchController:
         self.last_switch_at_ts = float(payload.get("last_switch_at_ts", 0.0) or 0.0)
         self.last_switch_reason = str(payload.get("last_switch_reason", "bootstrap"))
         self.last_decision = str(payload.get("last_decision", "bootstrap"))
+        self.switch_count = max(0, safe_int(payload.get("switch_count", 0), 0))
+        self.flap_count = max(0, safe_int(payload.get("flap_count", 0), 0))
+        self.last_switch_latency_sec = max(0.0, float(payload.get("last_switch_latency_sec", 0.0) or 0.0))
+        raw_history = payload.get("switch_history", [])
+        if isinstance(raw_history, list):
+            self.switch_history = [item for item in raw_history if isinstance(item, dict)][-self.config.switch_history_limit :]
 
     def _probe_meta_nodes(self) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         success_items: List[Dict[str, Any]] = []
@@ -250,6 +264,45 @@ class LeaderSwitchController:
             "unique_writable_leader_id": unique_writable_leader_id,
             "observed_leader_ids": sorted_observed_leaders,
         }
+
+    def _flap_window_sec(self) -> float:
+        # 冷却窗口的 2 倍作为抖动判定阈值，更容易识别“短时间频繁切换”。
+        return max(5.0, float(self.config.switch_cooldown_sec) * 2.0)
+
+    def _record_switch_event(
+        self,
+        *,
+        switched_at_ts: float,
+        from_leader_id: str,
+        to_leader_id: str,
+        candidate_epoch: int,
+        selection_reason: str,
+        decision: Dict[str, Any],
+    ) -> None:
+        pending_elapsed = max(0.0, switched_at_ts - self.pending_since_ts)
+        switch_interval = max(0.0, switched_at_ts - self.last_switch_at_ts) if self.last_switch_at_ts > 0 else 0.0
+        is_flap = bool(self.last_switch_at_ts > 0 and switch_interval <= self._flap_window_sec())
+
+        self.switch_count += 1
+        if is_flap:
+            self.flap_count += 1
+        self.last_switch_latency_sec = round(pending_elapsed, 3)
+
+        history_item = {
+            "switched_at": iso_from_ts(switched_at_ts),
+            "switched_at_ts": round(switched_at_ts, 3),
+            "from_leader_id": from_leader_id,
+            "to_leader_id": to_leader_id,
+            "candidate_epoch": int(candidate_epoch),
+            "selection_reason": selection_reason,
+            "pending_elapsed_sec": round(pending_elapsed, 3),
+            "switch_interval_sec": round(switch_interval, 3),
+            "is_flap": is_flap,
+            "switch_result": str(decision.get("switch_result", "")),
+        }
+        self.switch_history.append(history_item)
+        if len(self.switch_history) > self.config.switch_history_limit:
+            self.switch_history = self.switch_history[-self.config.switch_history_limit :]
 
     def _select_candidate_leader(
         self, success_items: List[Dict[str, Any]]
@@ -350,6 +403,15 @@ class LeaderSwitchController:
         decision["switched"] = switched
         decision["switch_result"] = detail
         if switched:
+            previous_leader_id = self.active_leader_id
+            self._record_switch_event(
+                switched_at_ts=now_ts,
+                from_leader_id=previous_leader_id,
+                to_leader_id=candidate_leader_id,
+                candidate_epoch=candidate_epoch,
+                selection_reason=selection_reason,
+                decision=decision,
+            )
             self.active_leader_id = candidate_leader_id
             self.active_since_ts = now_ts
             self.last_switch_at_ts = now_ts
@@ -358,6 +420,9 @@ class LeaderSwitchController:
                 f"selection={selection_reason},"
                 f"epoch={candidate_epoch}"
             )
+            decision["switch_count"] = self.switch_count
+            decision["flap_count"] = self.flap_count
+            decision["last_switch_latency_sec"] = self.last_switch_latency_sec
             self.pending_leader_id = ""
             self.pending_since_ts = 0.0
             self.last_decision = "switched"
@@ -441,11 +506,17 @@ class LeaderSwitchController:
             "last_switch_reason": self.last_switch_reason,
             "last_decision": self.last_decision,
             "last_error": self.last_error,
+            "switch_count": self.switch_count,
+            "flap_count": self.flap_count,
+            "last_switch_latency_sec": round(self.last_switch_latency_sec, 3),
+            "switch_history": self.switch_history,
             "switch_policy": {
                 "refresh_interval_sec": self.config.refresh_interval_sec,
                 "debounce_sec": self.config.switch_debounce_sec,
                 "cooldown_sec": self.config.switch_cooldown_sec,
                 "require_single_writable_leader": bool(self.config.require_single_writable_leader),
+                "flap_window_sec": self._flap_window_sec(),
+                "switch_history_limit": self.config.switch_history_limit,
             },
             "probes": {
                 "meta_nodes": self.config.meta_nodes,
