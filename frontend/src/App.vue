@@ -41,7 +41,7 @@ onBeforeUnmount(() => {
       <section class="demo-grid">
         <ClusterPanel class="demo-span-8" />
         <EntryPanel class="demo-span-4" />
-        <FilePanel class="demo-span-6" />
+        <FilePanel class="demo-span-12" />
         <TimelinePanel class="demo-span-12" />
       </section>
     </main>
