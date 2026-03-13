@@ -16,20 +16,26 @@ export class DemoApiError extends Error {
   }
 }
 
-async function requestDemo(path, { method = 'GET', signal } = {}) {
+async function requestDemo(path, { method = 'GET', signal, body } = {}) {
   // 统一请求入口：读取标准包络并把异常映射为 DemoApiError。
+  const headers = {
+    Accept: 'application/json'
+  }
+  if (body !== undefined) {
+    headers['Content-Type'] = 'application/json'
+  }
+
   const response = await fetch(`${DEMO_API_BASE_URL}${path}`, {
     method,
-    headers: {
-      Accept: 'application/json'
-    },
+    headers,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
     signal
   })
 
-  const body = await readJsonBody(response)
+  const responseBody = await readJsonBody(response)
 
-  if (!response.ok || !body?.ok) {
-    const error = body?.error || {}
+  if (!response.ok || !responseBody?.ok) {
+    const error = responseBody?.error || {}
     throw new DemoApiError({
       message: error.message || response.statusText || 'demo api request failed',
       code: error.code || '',
@@ -38,7 +44,7 @@ async function requestDemo(path, { method = 'GET', signal } = {}) {
     })
   }
 
-  return body.data || {}
+  return responseBody.data || {}
 }
 
 async function readJsonBody(response) {
@@ -56,4 +62,13 @@ export function fetchDemoState({ signal } = {}) {
 
 export function fetchDemoMetrics({ signal } = {}) {
   return requestDemo('/metrics', { signal })
+}
+
+export function postDemoAction(payload, { signal } = {}) {
+  // 动作调用：由 actionStore 触发，执行 stop/start/reload 链路。
+  return requestDemo('/action', {
+    method: 'POST',
+    signal,
+    body: payload
+  })
 }

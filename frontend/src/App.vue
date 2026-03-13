@@ -12,8 +12,8 @@ import TimelinePanel from './components/demo/TimelinePanel.vue'
 import { useDemoStateStore } from './stores/demoStateStore'
 import { useMetricStore } from './stores/metricStore'
 
-// 顶部阶段标记：用于明确当前页面已经进入数据流接线阶段。
-const phaseLabel = 'v0.2p00 · Commit 7 State & Metrics'
+// 顶部阶段标记：用于明确当前页面已接入动作确认与回执链路。
+const phaseLabel = 'v0.2p00 · Commit 8 Action Workflow'
 // 状态与指标 store：由根组件统一启动轮询，避免子组件重复请求。
 const demoStateStore = useDemoStateStore()
 const metricStore = useMetricStore()

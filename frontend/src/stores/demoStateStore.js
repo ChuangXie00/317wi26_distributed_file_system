@@ -2,6 +2,9 @@ import { reactive } from 'vue'
 
 import { fetchDemoState } from '../api/demoApi.js'
 
+const DEFAULT_VISIBLE_POLL_MS = 2000
+const DEFAULT_HIDDEN_POLL_MS = 5000
+
 // 单例状态：Commit 7 先集中管理 /state 轮询与展示字段。
 const state = reactive({
   snapshot: null,
@@ -13,15 +16,16 @@ const state = reactive({
   errorMessage: '',
   errorCode: '',
   // 前台可见时轮询周期（ms），对齐 8890 Commit 7 要求。
-  visiblePollMs: 2000,
+  visiblePollMs: DEFAULT_VISIBLE_POLL_MS,
   // 页面隐藏时降低轮询频率，减少无效请求。
-  hiddenPollMs: 5000
+  hiddenPollMs: DEFAULT_HIDDEN_POLL_MS
 })
 
 let pollingRefCount = 0
 let pollingTimer = null
 let inFlightPromise = null
 let visibilityListenerBound = false
+let boostResetTimer = null
 
 function getCurrentPollMs() {
   if (typeof document !== 'undefined' && document.hidden) {
@@ -76,7 +80,8 @@ export function useDemoStateStore() {
     state,
     startPolling,
     stopPolling,
-    refreshNow
+    refreshNow,
+    boostPolling
   }
 }
 
@@ -143,5 +148,24 @@ function stopPolling() {
     clearTimeout(pollingTimer)
     pollingTimer = null
   }
+  if (boostResetTimer) {
+    clearTimeout(boostResetTimer)
+    boostResetTimer = null
+  }
+  state.visiblePollMs = DEFAULT_VISIBLE_POLL_MS
   unbindVisibilityListener()
+}
+
+export function boostPolling(durationMs = 30000, boostedPollMs = 1000) {
+  // 动作窗口提频：Commit 8 起在动作后 30s 内把 /state 提升到 1s。
+  const targetPollMs = Math.max(300, Math.min(boostedPollMs, DEFAULT_VISIBLE_POLL_MS))
+  state.visiblePollMs = targetPollMs
+
+  if (boostResetTimer) {
+    clearTimeout(boostResetTimer)
+  }
+  boostResetTimer = setTimeout(() => {
+    state.visiblePollMs = DEFAULT_VISIBLE_POLL_MS
+    boostResetTimer = null
+  }, Math.max(1000, durationMs))
 }

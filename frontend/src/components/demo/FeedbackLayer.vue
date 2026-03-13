@@ -22,6 +22,10 @@ import ToastResult from './feedback/ToastResult.vue'
   pointer-events: none;
 }
 
+.feedback-layer > * {
+  pointer-events: auto;
+}
+
 @media (max-width: 720px) {
   .feedback-layer {
     right: 10px;
