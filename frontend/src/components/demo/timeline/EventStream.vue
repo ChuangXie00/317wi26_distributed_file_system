@@ -5,8 +5,11 @@ import { useEventStore } from '../../../stores/eventStore.js'
 
 const eventStore = useEventStore()
 
-// 事件列表：保持按 seq 升序展示，便于验证“无重复且顺序正确”。
-const events = computed(() => eventStore.state.visibleEvents)
+// 事件列表展示层倒序：保持 store 内部升序，UI 展示改为最新在最上。
+const events = computed(() => {
+  const source = Array.isArray(eventStore.state.visibleEvents) ? eventStore.state.visibleEvents : []
+  return [...source].reverse()
+})
 const loading = computed(() => eventStore.state.loading)
 const sinceSeq = computed(() => Math.max(0, Number(eventStore.state.nextSeq || 1) - 1))
 const lastUpdatedAt = computed(() => eventStore.state.lastUpdatedAt)
