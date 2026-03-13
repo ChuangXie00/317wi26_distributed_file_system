@@ -53,6 +53,21 @@ class DownloadResult:
         }
 
 
+@dataclass
+class ReplicaMatrixResult:
+    # 副本矩阵结果：用于 File Panel 展示每个 chunk 的副本分布。
+    file_name: str
+    chunk_count: int
+    rows: list[dict[str, Any]]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "file_name": self.file_name,
+            "chunk_count": self.chunk_count,
+            "rows": self.rows,
+        }
+
+
 class DemoFileService:
     def __init__(self) -> None:
         # 复用 meta-entry 作为稳定入口，避免前端直接依赖 leader 节点地址。
@@ -98,11 +113,7 @@ class DemoFileService:
         if not normalized_name:
             raise DemoFileError(http_status=400, code="DEMO-FILE-001", message="file_name is required")
 
-        meta_url = f"{self.meta_base_url}/file/{quote(normalized_name)}"
-        metadata = self._request_json(method="GET", url=meta_url, error_code="DEMO-FILE-003")
-        chunks = metadata.get("chunks")
-        if not isinstance(chunks, list):
-            raise DemoFileError(http_status=500, code="DEMO-FILE-003", message="invalid file metadata")
+        chunks = self._fetch_file_metadata(normalized_name)
 
         out = bytearray()
         for item in chunks:
@@ -125,6 +136,35 @@ class DemoFileService:
             total_bytes=len(content_bytes),
             chunk_count=len(chunks),
             content_base64=base64.b64encode(content_bytes).decode("ascii"),
+        )
+
+    def get_replica_matrix(self, *, file_name: str) -> ReplicaMatrixResult:
+        normalized_name = str(file_name or "").strip()
+        if not normalized_name:
+            raise DemoFileError(http_status=400, code="DEMO-FILE-001", message="file_name is required")
+
+        chunks = self._fetch_file_metadata(normalized_name)
+        rows: list[dict[str, Any]] = []
+        for index, item in enumerate(chunks):
+            if not isinstance(item, dict):
+                continue
+            fingerprint = str(item.get("fingerprint", "")).strip()
+            locations_raw = item.get("locations")
+            locations = [str(node).strip() for node in locations_raw] if isinstance(locations_raw, list) else []
+            locations = [node for node in locations if node]
+            rows.append(
+                {
+                    "chunk_index": index,
+                    "fingerprint": fingerprint,
+                    "locations": locations,
+                    "replica_count": len(locations),
+                }
+            )
+
+        return ReplicaMatrixResult(
+            file_name=normalized_name,
+            chunk_count=len(rows),
+            rows=rows,
         )
 
     def _resolve_chunk_locations(self, fingerprint: str) -> list[str]:
@@ -227,6 +267,15 @@ class DemoFileService:
             payload={"file_name": file_name, "chunks": chunk_fps},
             error_code="DEMO-FILE-002",
         )
+
+    def _fetch_file_metadata(self, file_name: str) -> list[dict[str, Any]]:
+        # 统一读取 file 元数据，供下载与副本矩阵共用。
+        meta_url = f"{self.meta_base_url}/file/{quote(file_name)}"
+        metadata = self._request_json(method="GET", url=meta_url, error_code="DEMO-FILE-003")
+        chunks = metadata.get("chunks")
+        if not isinstance(chunks, list):
+            raise DemoFileError(http_status=500, code="DEMO-FILE-003", message="invalid file metadata")
+        return [item for item in chunks if isinstance(item, dict)]
 
     def _request_json(
         self,

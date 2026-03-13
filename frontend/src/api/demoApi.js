@@ -126,3 +126,10 @@ export function fetchDemoFileDownload({ fileName, signal } = {}) {
   params.set('file_name', String(fileName || '').trim())
   return requestDemo(`/file/download?${params.toString()}`, { signal })
 }
+
+export function fetchDemoFileReplicas({ fileName, signal } = {}) {
+  // 查询文件副本矩阵：返回每个 chunk 的 fingerprint 与副本节点列表。
+  const params = new URLSearchParams()
+  params.set('file_name', String(fileName || '').trim())
+  return requestDemo(`/file/replicas?${params.toString()}`, { signal })
+}

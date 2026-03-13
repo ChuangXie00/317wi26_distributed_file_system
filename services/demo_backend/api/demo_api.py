@@ -302,6 +302,34 @@ def get_file_download(
         )
 
 
+@router.get("/file/replicas")
+def get_file_replicas(
+    file_name: str = Query(..., min_length=1),
+    x_request_id: str | None = Header(default=None, alias="X-Request-Id"),
+):
+    # 副本矩阵：返回文件每个 chunk 的 replica 分布，供 File Panel 展示。
+    request_id = _request_id(x_request_id)
+    try:
+        result = file_service.get_replica_matrix(file_name=file_name)
+        return _ok_response(request_id=request_id, data=result.to_dict())
+    except DemoFileError as exc:
+        return _error_response(
+            request_id=request_id,
+            status_code=exc.http_status,
+            code=exc.code,
+            message=exc.message,
+            details=exc.details or {},
+        )
+    except Exception as exc:
+        return _error_response(
+            request_id=request_id,
+            status_code=500,
+            code="DEMO-FILE-999",
+            message="unexpected file replica query error",
+            details={"error": str(exc)},
+        )
+
+
 def _parse_int_query(
     raw: str | None,
     *,
