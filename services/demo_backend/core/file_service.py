@@ -191,11 +191,31 @@ class DemoFileService:
         )
 
     def list_files(self, *, limit: int = 200) -> FileListResult:
-        payload = self._request_json(
-            method="GET",
-            url=f"{self.meta_base_url}/files?limit={max(1, min(int(limit), 1000))}",
-            error_code="DEMO-FILE-003",
-        )
+        list_limit = max(1, min(int(limit), 1000))
+        payload: dict[str, Any] = {}
+
+        # 兼容不同版本上游：优先 /files，若 404 再尝试历史路径 /file/list。
+        try:
+            payload = self._request_json(
+                method="GET",
+                url=f"{self.meta_base_url}/files?limit={list_limit}",
+                error_code="DEMO-FILE-003",
+            )
+        except DemoFileError as exc:
+            if exc.http_status != 404:
+                raise
+            try:
+                payload = self._request_json(
+                    method="GET",
+                    url=f"{self.meta_base_url}/file/list?limit={list_limit}",
+                    error_code="DEMO-FILE-003",
+                )
+            except DemoFileError as fallback_exc:
+                # 上游未实现文件列表接口时，前端按空列表降级展示，不视为错误。
+                if fallback_exc.http_status == 404:
+                    return FileListResult(files=[])
+                raise
+
         items = payload.get("files")
         if not isinstance(items, list):
             raise DemoFileError(http_status=502, code="DEMO-FILE-003", message="invalid file list payload")
@@ -219,11 +239,17 @@ class DemoFileService:
         if not normalized_name:
             raise DemoFileError(http_status=400, code="DEMO-FILE-001", message="file_name is required")
 
-        self._request_json(
-            method="DELETE",
-            url=f"{self.meta_base_url}/file/{quote(normalized_name)}",
-            error_code="DEMO-FILE-002",
-        )
+        try:
+            self._request_json(
+                method="DELETE",
+                url=f"{self.meta_base_url}/file/{quote(normalized_name)}",
+                error_code="DEMO-FILE-002",
+            )
+        except DemoFileError as exc:
+            detail = str((exc.details or {}).get("upstream_detail", "")).lower()
+            if "file not found" in detail:
+                raise DemoFileError(http_status=404, code="DEMO-FILE-003", message="file not found") from exc
+            raise
         return FileDeleteResult(file_name=normalized_name)
 
     def _resolve_chunk_locations(self, fingerprint: str) -> list[str]:
