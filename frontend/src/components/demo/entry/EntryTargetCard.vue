@@ -34,7 +34,7 @@ const chipClass = computed(() => {
       <p class="kpi-tile__value">active_leader_id: {{ entry.active_leader_id || '--' }}</p>
       <p class="empty-state">pending_leader_id={{ entry.pending_leader_id || '--' }}</p>
       <p class="empty-state">last_decision={{ entry.last_decision || '--' }}</p>
-      <p class="empty-state">switch_count={{ entry.switch_count ?? 0 }}</p>
+      <p class="empty-state">entry_switch_count={{ entry.switch_count ?? 0 }}</p>
     </div>
   </article>
 </template>

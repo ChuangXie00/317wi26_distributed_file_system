@@ -90,11 +90,10 @@ function requestAction(action) {
         <button type="button" class="btn" :disabled="actionDisabled" @click="requestAction('reload')">
           reload
         </button>
+        {{ actionStore.state.submitting ? 'please waiting…' : '' }}
       </div>
 
-      <p class="empty-state">
-        {{ actionStore.state.submitting ? 'please waiting…' : '' }}
-      </p>
+
     </div>
   </article>
 </template>
