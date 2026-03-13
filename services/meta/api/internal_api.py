@@ -5,6 +5,7 @@ from core.config import META_NODE_ID
 from .vo import (
     CoordinatorReq,
     CoordinatorResp,
+    CurrentLeaderResp,
     ElectionReq,
     ElectionResp,
     LeaderHeartbeatReq,
@@ -18,6 +19,7 @@ from .vo import (
 )
 from .internal_service import (
     process_internal_coordinator,
+    process_internal_current_leader,
     process_internal_election,
     process_internal_heartbeat,
     process_internal_replicate_state,
@@ -48,6 +50,12 @@ def internal_replicate_state(req: ReplicateStateReq) -> ReplicateStateResp:
 @router.get("/internal/state_snapshot")
 def internal_state_snapshot() -> dict:
     return process_internal_state_snapshot()
+
+
+@router.get("/internal/current_leader", response_model=CurrentLeaderResp)
+def internal_current_leader() -> CurrentLeaderResp:
+    result = process_internal_current_leader()
+    return CurrentLeaderResp(**result)
 
 
 @router.post("/internal/election", response_model=ElectionResp)

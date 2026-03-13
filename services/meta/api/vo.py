@@ -98,6 +98,20 @@ class ReplicateStateResp(BaseModel):
     lamport: int = Field(default=0, ge=0)
 
 
+# entry 查询当前 leader 的统一响应体（只读观测，不参与选主）。
+class CurrentLeaderResp(BaseModel):
+    status: Literal["ok"]
+    node_id: str
+    role: str
+    current_leader_id: str
+    leader_epoch: int = Field(default=0, ge=0)
+    current_term: int = Field(default=0, ge=0)
+    voted_for: str = ""
+    writable_leader: bool = False
+    lamport: int = Field(default=0, ge=0)
+    observed_at: str = ""
+
+
 # Bully election 请求体。
 class ElectionReq(BaseModel):
     candidate_id: str = Field(..., min_length=1)

@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from typing import Dict
 
 from fastapi import HTTPException
@@ -66,6 +67,24 @@ def process_internal_replicate_state(snapshot: Dict[str, object]) -> Dict[str, o
         "applied_at": str(result["applied_at"]),
         "detail": str(result.get("detail", "")),
         "lamport": int(result.get("lamport", get_lamport_clock())),
+    }
+
+
+# 输出当前节点观测到的 leader 视图，供 entry 做跨节点收敛判断。
+def process_internal_current_leader() -> Dict[str, object]:
+    runtime = get_runtime_snapshot()
+    return {
+        "status": "ok",
+        "node_id": str(runtime.get("node_id", META_NODE_ID)),
+        "role": str(runtime.get("role", "follower")),
+        "current_leader_id": str(runtime.get("current_leader_id", "")),
+        "leader_epoch": int(runtime.get("leader_epoch", 0)),
+        "current_term": int(runtime.get("current_term", 0)),
+        "voted_for": str(runtime.get("voted_for", "")),
+        "writable_leader": bool(is_writable_leader()),
+        "lamport": int(runtime.get("lamport_clock", get_lamport_clock())),
+        # 中文：返回本节点生成观测快照的时间，便于 entry 判断数据新鲜度。
+        "observed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
 
 
