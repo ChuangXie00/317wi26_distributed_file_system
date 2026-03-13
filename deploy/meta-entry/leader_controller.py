@@ -62,6 +62,7 @@ class ControllerConfig:
     switch_debounce_sec: float
     switch_cooldown_sec: float
     request_timeout_sec: float
+    require_single_writable_leader: bool
     # 默认目标与动态配置落盘路径。
     default_leader_id: str
     upstream_conf_path: str
@@ -101,6 +102,9 @@ class ControllerConfig:
             switch_debounce_sec=max(0.0, float(os.getenv("ENTRY_SWITCH_DEBOUNCE_SEC", "2.0"))),
             switch_cooldown_sec=max(0.0, float(os.getenv("ENTRY_SWITCH_COOLDOWN_SEC", "6.0"))),
             request_timeout_sec=max(0.1, float(os.getenv("ENTRY_REQUEST_TIMEOUT_SEC", "1.2"))),
+            # 开启后，entry 仅在“唯一可写 leader”成立时才允许切换。
+            require_single_writable_leader=str(os.getenv("ENTRY_REQUIRE_SINGLE_WRITABLE_LEADER", "0")).strip().lower()
+            in {"1", "true", "yes", "on"},
             default_leader_id=default_leader or meta_nodes[0],
             upstream_conf_path=str(os.getenv("ENTRY_UPSTREAM_CONF_PATH", "/etc/nginx/conf.d/meta_upstream.conf")).strip()
             or "/etc/nginx/conf.d/meta_upstream.conf",
@@ -131,7 +135,7 @@ class LeaderSwitchController:
         # 启动时尽量复用上次状态，避免重启后立即误切。
         self._load_previous_status()
         self._ensure_upstream_file_initialized()
-        self._write_status([], [], {})
+        self._write_status([], [], {}, self._build_probe_consensus([]))
 
     def run(self, once: bool = False) -> None:
         # 常驻循环：探测 -> 决策 -> 落盘，按固定节拍执行。
@@ -149,10 +153,11 @@ class LeaderSwitchController:
         now_ts = time.time()
         # 先收集观测样本，再按统一规则选候选 leader。
         success_items, error_items = self._probe_meta_nodes()
+        consensus = self._build_probe_consensus(success_items)
         candidate_leader_id, candidate_epoch, selection_reason = self._select_candidate_leader(success_items)
         # 切换决策会处理防抖、冷却和 reload 成功性。
-        decision = self._decide_switch(now_ts, candidate_leader_id, candidate_epoch, selection_reason)
-        self._write_status(success_items, error_items, decision)
+        decision = self._decide_switch(now_ts, candidate_leader_id, candidate_epoch, selection_reason, consensus)
+        self._write_status(success_items, error_items, decision, consensus)
 
     def _load_previous_status(self) -> None:
         status_path = Path(self.config.status_path)
@@ -223,6 +228,29 @@ class LeaderSwitchController:
                 )
         return success_items, error_items
 
+    def _build_probe_consensus(self, success_items: List[Dict[str, Any]]) -> Dict[str, Any]:
+        # 汇总本轮探测的一致性信号，供切换门禁与 debug 观测共用。
+        writable_nodes = set()
+        observed_leader_ids = set()
+        for item in success_items:
+            node_id = normalize_node_id(item.get("node_id", ""))
+            if item.get("writable_leader") and node_id:
+                writable_nodes.add(node_id)
+            leader_id = normalize_node_id(item.get("current_leader_id", ""))
+            if leader_id:
+                observed_leader_ids.add(leader_id)
+
+        sorted_writable_nodes = sorted(writable_nodes)
+        sorted_observed_leaders = sorted(observed_leader_ids)
+        unique_writable_leader_id = sorted_writable_nodes[0] if len(sorted_writable_nodes) == 1 else ""
+        return {
+            "require_single_writable_leader": bool(self.config.require_single_writable_leader),
+            "single_writable_leader": len(sorted_writable_nodes) == 1,
+            "writable_leader_nodes": sorted_writable_nodes,
+            "unique_writable_leader_id": unique_writable_leader_id,
+            "observed_leader_ids": sorted_observed_leaders,
+        }
+
     def _select_candidate_leader(
         self, success_items: List[Dict[str, Any]]
     ) -> Tuple[str, int, str]:
@@ -250,6 +278,7 @@ class LeaderSwitchController:
         candidate_leader_id: str,
         candidate_epoch: int,
         selection_reason: str,
+        consensus: Dict[str, Any],
     ) -> Dict[str, Any]:
         decision: Dict[str, Any] = {
             "candidate_leader_id": candidate_leader_id,
@@ -266,6 +295,28 @@ class LeaderSwitchController:
             self.last_decision = "stable_active_leader"
             decision["decision"] = self.last_decision
             return decision
+
+        if self.config.require_single_writable_leader:
+            writable_nodes = list(consensus.get("writable_leader_nodes", []))
+            unique_writable_leader = normalize_node_id(consensus.get("unique_writable_leader_id", ""))
+            if not bool(consensus.get("single_writable_leader", False)):
+                self.pending_leader_id = ""
+                self.pending_since_ts = 0.0
+                self.last_decision = "switch_blocked_no_single_writable_leader"
+                decision["decision"] = self.last_decision
+                decision["switch_blocked_by"] = "single_writable_leader"
+                decision["writable_leader_nodes"] = writable_nodes
+                return decision
+
+            # 只有唯一可写 leader 与候选 leader 一致时才允许进入切换路径。
+            if unique_writable_leader and unique_writable_leader != candidate_leader_id:
+                self.pending_leader_id = ""
+                self.pending_since_ts = 0.0
+                self.last_decision = "switch_blocked_writable_leader_mismatch"
+                decision["decision"] = self.last_decision
+                decision["switch_blocked_by"] = "writable_leader_mismatch"
+                decision["unique_writable_leader_id"] = unique_writable_leader
+                return decision
 
         # 首次观察到新候选时只进入 pending，不立即切流。
         if candidate_leader_id != self.pending_leader_id:
@@ -369,6 +420,7 @@ class LeaderSwitchController:
         success_items: List[Dict[str, Any]],
         error_items: List[Dict[str, Any]],
         decision: Dict[str, Any],
+        consensus: Dict[str, Any],
     ) -> None:
         # 每轮决策都落盘，便于 /debug/entry 实时观测切换状态与探测细节。
         status_path = Path(self.config.status_path)
@@ -393,6 +445,7 @@ class LeaderSwitchController:
                 "refresh_interval_sec": self.config.refresh_interval_sec,
                 "debounce_sec": self.config.switch_debounce_sec,
                 "cooldown_sec": self.config.switch_cooldown_sec,
+                "require_single_writable_leader": bool(self.config.require_single_writable_leader),
             },
             "probes": {
                 "meta_nodes": self.config.meta_nodes,
@@ -401,6 +454,7 @@ class LeaderSwitchController:
                 "successes": success_items,
                 "errors": error_items,
             },
+            "consensus": consensus,
             "decision": decision,
         }
         status_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
