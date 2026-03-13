@@ -7,7 +7,6 @@ const demoStateStore = useDemoStateStore()
 
 // 收敛判定数据来源：/api/demo/state 的 derived 视图。
 const derived = computed(() => demoStateStore.state.snapshot?.derived || {})
-const observedLeaderId = computed(() => demoStateStore.state.snapshot?.leader_view?.leader || '--')
 
 const singleObservedLeader = computed(() => {
   const value = derived.value?.single_observed_leader
@@ -48,7 +47,6 @@ function boolChipClass(value) {
       <span :class="boolChipClass(singleObservedLeader)">observed</span>
       <span :class="boolChipClass(singleWritableLeader)">writable</span>
     </div>
-    <p class="empty-state">observed_leader={{ observedLeaderId }}</p>
   </article>
 </template>
 
