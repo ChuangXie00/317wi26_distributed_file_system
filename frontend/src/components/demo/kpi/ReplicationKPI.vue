@@ -7,18 +7,8 @@ const demoStateStore = useDemoStateStore()
 
 // 复制状态数据来源：/api/demo/state 的 replication_view。
 const replicationView = computed(() => demoStateStore.state.snapshot?.replication_view || {})
-const heartbeat = computed(() => replicationView.value?.heartbeat || {})
 const snapshot = computed(() => replicationView.value?.snapshot || {})
 const sync = computed(() => replicationView.value?.sync || {})
-const takeover = computed(() => replicationView.value?.takeover || {})
-
-const heartbeatText = computed(() => {
-  if (typeof heartbeat.value?.alive === 'boolean') {
-    return heartbeat.value.alive ? 'alive' : 'dead'
-  }
-  const observedAt = String(heartbeat.value?.last_observed_at || '').trim()
-  return observedAt ? `last_observed=${formatTs(observedAt)}` : '--'
-})
 
 const snapshotText = computed(() => {
   const successAt = String(snapshot.value?.last_snapshot_success_at || '').trim()
@@ -41,15 +31,6 @@ const syncText = computed(() => {
   return '--'
 })
 
-const takeoverText = computed(() => {
-  const result = String(takeover.value?.last_takeover_result || '').trim()
-  if (result) {
-    return result
-  }
-  const reason = String(takeover.value?.last_takeover_reason || '').trim()
-  return reason || '--'
-})
-
 function formatTs(ts) {
   if (!ts) {
     return '--'
@@ -65,13 +46,10 @@ function formatTs(ts) {
 <template>
   <article class="kpi-tile">
     <p class="kpi-tile__label">Replication</p>
-    <p class="kpi-tile__value">{{ takeoverText }}</p>
     <div class="chip-row">
-      <span class="chip">heartbeat: {{ heartbeatText }}</span>
       <span class="chip">snapshot: {{ snapshotText }}</span>
       <span class="chip">sync: {{ syncText }}</span>
     </div>
-    <p class="empty-state">takeover={{ takeoverText }}</p>
   </article>
 </template>
 
