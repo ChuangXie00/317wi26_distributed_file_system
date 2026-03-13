@@ -7,6 +7,7 @@ from infra.meta_entry_client import MetaEntryClient
 
 @dataclass
 class AggregationResult:
+    # 聚合返回模型：成功返回 data，失败返回标准错误信息。
     ok: bool
     data: dict[str, Any] | None = None
     error_code: str | None = None
@@ -16,12 +17,17 @@ class AggregationResult:
 
 class StateAggregator:
     def __init__(self, meta_entry_client: MetaEntryClient) -> None:
+        # 上游客户端：负责并发拉取 debug 源数据。
         self._client = meta_entry_client
+        # 保护 snapshot_seq 自增的线程安全。
         self._lock = threading.Lock()
+        # 快照序号：每次聚合成功返回时递增，供前端比对刷新。
         self._snapshot_seq = 0
+        # 每个 source 最近一次有效快照，用于降级回退。
         self._last_valid: dict[str, dict[str, Any]] = {}
 
     def aggregate(self) -> AggregationResult:
+        # 并发拉取四个上游源。
         upstream = self._client.fetch_all_parallel()
         source_health: dict[str, str] = {}
         warnings: list[str] = []
@@ -29,19 +35,23 @@ class StateAggregator:
 
         for source, result in upstream.items():
             if result.ok and isinstance(result.data, dict):
+                # 拉取成功：直接使用新值并刷新缓存。
                 merged[source] = result.data
                 source_health[source] = "ok"
                 self._last_valid[source] = result.data
                 continue
 
+            # 拉取失败：优先回退到该 source 的最近有效值。
             source_health[source] = "error"
             if source in self._last_valid:
                 merged[source] = self._last_valid[source]
                 warnings.append(f"{source} upstream failed; fallback to last valid snapshot")
             else:
+                # 首次即失败且无缓存时，先给空对象并记录 warning。
                 merged[source] = {}
                 warnings.append(f"{source} upstream failed; no cached snapshot")
 
+        # 全源不可用且历史缓存也为空时，返回 503 级别错误。
         if all(status == "error" for status in source_health.values()) and not self._last_valid:
             return AggregationResult(
                 ok=False,
@@ -51,13 +61,16 @@ class StateAggregator:
             )
 
         with self._lock:
+            # 每次成功聚合输出一个新序号，确保调用方可判定新旧快照。
             self._snapshot_seq += 1
             snapshot_seq = self._snapshot_seq
 
+        # 将不同上游格式标准化为统一 API 契约结构。
         entry = _normalize_entry(merged.get("entry") or {})
         leader_view = _normalize_leader(merged.get("leader") or {})
         membership_view = _normalize_membership(merged.get("membership") or {})
         replication_view = _normalize_replication(merged.get("replication") or {})
+        # 计算前端直接消费的衍生字段，避免 UI 重复推导。
         derived = _derive(entry, leader_view, membership_view, source_health)
 
         return AggregationResult(
@@ -76,6 +89,7 @@ class StateAggregator:
 
 
 def _normalize_entry(payload: dict[str, Any]) -> dict[str, Any]:
+    # entry 视图字段归一化：缺失字段回退为契约默认值。
     return {
         "active_leader_id": _as_str(payload.get("active_leader_id")),
         "pending_leader_id": _as_str(payload.get("pending_leader_id")),
@@ -85,6 +99,7 @@ def _normalize_entry(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _normalize_leader(payload: dict[str, Any]) -> dict[str, Any]:
+    # leader 视图归一化：meta_cluster 非 list 时兜底为空列表。
     meta_cluster = payload.get("meta_cluster")
     if not isinstance(meta_cluster, list):
         meta_cluster = []
@@ -101,14 +116,17 @@ def _normalize_leader(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _normalize_membership(payload: dict[str, Any]) -> dict[str, Any]:
+    # membership 主体兜底为空对象，保证前端可安全遍历。
     membership = payload.get("membership")
     if not isinstance(membership, dict):
         membership = {}
 
+    # 若上游未给 summary，则根据 membership 现算。
     summary = payload.get("summary")
     if not isinstance(summary, dict):
         summary = _build_summary(membership)
 
+    # 若上游未给 node_type_summary，则按节点前缀现算。
     node_type_summary = payload.get("node_type_summary")
     if not isinstance(node_type_summary, dict):
         node_type_summary = _build_node_type_summary(membership)
@@ -130,6 +148,7 @@ def _normalize_membership(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _normalize_replication(payload: dict[str, Any]) -> dict[str, Any]:
+    # replication 子视图统一保证四个对象字段存在。
     return {
         "heartbeat": _as_dict(payload.get("heartbeat")),
         "snapshot": _as_dict(payload.get("snapshot")),
@@ -144,6 +163,7 @@ def _derive(
     membership_view: dict[str, Any],
     source_health: dict[str, str],
 ) -> dict[str, Any]:
+    # derived 字段用于前端一屏展示与健康状态判断。
     membership = membership_view.get("membership", {})
     meta_nodes = sorted([node_id for node_id in membership.keys() if str(node_id).startswith("meta-")])
     storage_nodes = sorted(
@@ -154,6 +174,7 @@ def _derive(
     single_writable_leader = bool(leader_view.get("writable_leader"))
     poll_health = "ok" if all(v == "ok" for v in source_health.values()) else "degraded"
 
+    # 无 membership 时回退使用 entry.active_leader_id，避免 meta_nodes 为空。
     if not meta_nodes:
         fallback_meta = _as_str(entry.get("active_leader_id"))
         if fallback_meta:
@@ -169,6 +190,7 @@ def _derive(
 
 
 def _build_summary(membership: dict[str, Any]) -> dict[str, int]:
+    # 统计 alive/suspected/dead/total，兼容缺失 status 的节点。
     alive = 0
     suspected = 0
     dead = 0
@@ -192,6 +214,7 @@ def _build_summary(membership: dict[str, Any]) -> dict[str, int]:
 
 
 def _build_node_type_summary(membership: dict[str, Any]) -> dict[str, int]:
+    # 按节点 ID 前缀区分 meta 与 storage 数量。
     meta_count = 0
     storage_count = 0
     for node_id in membership.keys():
@@ -208,12 +231,14 @@ def _build_node_type_summary(membership: dict[str, Any]) -> dict[str, int]:
 
 
 def _as_str(value: Any) -> str:
+    # 通用字符串兜底转换。
     if value is None:
         return ""
     return str(value)
 
 
 def _as_int(value: Any) -> int:
+    # 通用整数兜底转换，异常时返回 0。
     try:
         return int(value)
     except (TypeError, ValueError):
@@ -221,6 +246,7 @@ def _as_int(value: Any) -> int:
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
+    # 通用对象兜底转换，保证返回 dict。
     if isinstance(value, dict):
         return value
     return {}
