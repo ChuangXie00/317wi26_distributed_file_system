@@ -17,7 +17,7 @@ export class DemoApiError extends Error {
 }
 
 async function requestDemo(path, { method = 'GET', signal, body } = {}) {
-  // 统一请求入口：读取标准包络并把异常映射为 DemoApiError。
+  // 统一请求入口：读取标准包络，并把异常映射为 DemoApiError。
   const headers = {
     Accept: 'application/json'
   }
@@ -33,7 +33,6 @@ async function requestDemo(path, { method = 'GET', signal, body } = {}) {
   })
 
   const responseBody = await readJsonBody(response)
-
   if (!response.ok || !responseBody?.ok) {
     const error = responseBody?.error || {}
     throw new DemoApiError({
@@ -48,7 +47,7 @@ async function requestDemo(path, { method = 'GET', signal, body } = {}) {
 }
 
 async function readJsonBody(response) {
-  // 统一 JSON 解析：即使后端异常返回文本，也保证调用方拿到对象。
+  // 统一 JSON 解析：即使后端返回非 JSON，也保证调用方拿到对象。
   try {
     return await response.json()
   } catch {
@@ -71,4 +70,21 @@ export function postDemoAction(payload, { signal } = {}) {
     signal,
     body: payload
   })
+}
+
+export function fetchDemoEvents({ sinceSeq = 0, limit = 50, types = [], signal } = {}) {
+  // 事件查询：支持 since_seq 增量拉取与 type 多值筛选。
+  const params = new URLSearchParams()
+  params.set('since_seq', String(Math.max(0, Number(sinceSeq) || 0)))
+  params.set('limit', String(Math.max(1, Math.min(200, Number(limit) || 50))))
+
+  for (const type of types) {
+    const value = String(type || '').trim()
+    if (!value) {
+      continue
+    }
+    params.append('type', value)
+  }
+
+  return requestDemo(`/events?${params.toString()}`, { signal })
 }

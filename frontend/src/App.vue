@@ -10,22 +10,26 @@ import GlobalHeader from './components/demo/GlobalHeader.vue'
 import KPIBar from './components/demo/KPIBar.vue'
 import TimelinePanel from './components/demo/TimelinePanel.vue'
 import { useDemoStateStore } from './stores/demoStateStore'
+import { useEventStore } from './stores/eventStore'
 import { useMetricStore } from './stores/metricStore'
 
-// 顶部阶段标记：用于明确当前页面已接入动作确认与回执链路。
-const phaseLabel = 'v0.2p00 · Commit 8 Action Workflow'
-// 状态与指标 store：由根组件统一启动轮询，避免子组件重复请求。
+// 顶部阶段标记：Commit 9 已接入时间线与事件筛选链路。
+const phaseLabel = 'v0.2p00 · Commit 9 Timeline Events'
+// 三类 store 统一由根组件启动轮询，避免子组件重复拉取。
 const demoStateStore = useDemoStateStore()
 const metricStore = useMetricStore()
+const eventStore = useEventStore()
 
 onMounted(() => {
   demoStateStore.startPolling()
   metricStore.startPolling()
+  eventStore.startPolling()
 })
 
 onBeforeUnmount(() => {
   demoStateStore.stopPolling()
   metricStore.stopPolling()
+  eventStore.stopPolling()
 })
 </script>
 
