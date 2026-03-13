@@ -2,12 +2,13 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from fastapi import APIRouter, Header, Request
+from fastapi import APIRouter, File, Header, Query, Request, UploadFile
 from fastapi.responses import JSONResponse
 
 from core.action_executor import ActionExecutor
 from core.aggregator import StateAggregator
 from core.event_engine import ALLOWED_EVENT_FILTERS, EventEngine
+from core.file_service import DemoFileError, DemoFileService
 from core.metrics_engine import MetricsEngine
 from core.schemas import DemoApiError, parse_action_request
 from infra.meta_entry_client import MetaEntryClient
@@ -23,6 +24,7 @@ action_executor = ActionExecutor()
 event_engine = EventEngine()
 # 指标引擎：负责 /metrics 口径聚合与无样本处理。
 metrics_engine = MetricsEngine(event_engine)
+file_service = DemoFileService()
 
 
 def _request_id(x_request_id: str | None) -> str:
@@ -238,6 +240,66 @@ def get_metrics(x_request_id: str | None = Header(default=None, alias="X-Request
             details=result.data,
         )
     return _ok_response(request_id=request_id, data=result.data)
+
+
+@router.post("/file/upload")
+async def post_file_upload(
+    file: UploadFile = File(...),
+    file_name: str | None = None,
+    x_request_id: str | None = Header(default=None, alias="X-Request-Id"),
+):
+    # 文件上传：由 demo-backend 代理执行 chunk 注册/上传/commit。
+    request_id = _request_id(x_request_id)
+    try:
+        raw = await file.read()
+        chosen_name = str(file_name or file.filename or "").strip()
+        result = file_service.upload_file(file_name=chosen_name, content=raw or b"")
+        return _ok_response(request_id=request_id, data=result.to_dict())
+    except DemoFileError as exc:
+        return _error_response(
+            request_id=request_id,
+            status_code=exc.http_status,
+            code=exc.code,
+            message=exc.message,
+            details=exc.details or {},
+        )
+    except Exception as exc:
+        return _error_response(
+            request_id=request_id,
+            status_code=500,
+            code="DEMO-FILE-999",
+            message="unexpected file upload error",
+            details={"error": str(exc)},
+        )
+
+
+@router.get("/file/download")
+def get_file_download(
+    file_name: str = Query(..., min_length=1),
+    x_request_id: str | None = Header(default=None, alias="X-Request-Id"),
+):
+    # 文件下载：按元数据拼装全部 chunk 后，返回 base64 内容给前端还原下载。
+    request_id = _request_id(x_request_id)
+    try:
+        result = file_service.download_file(file_name=file_name)
+        # 统一返回结构，前端仍通过 DemoApiError 体系处理错误。
+        return _ok_response(request_id=request_id, data=result.to_dict())
+    except DemoFileError as exc:
+        return _error_response(
+            request_id=request_id,
+            status_code=exc.http_status,
+            code=exc.code,
+            message=exc.message,
+            details=exc.details or {},
+        )
+    except Exception as exc:
+        return _error_response(
+            request_id=request_id,
+            status_code=500,
+            code="DEMO-FILE-999",
+            message="unexpected file download error",
+            details={"error": str(exc)},
+        )
 
 
 def _parse_int_query(

@@ -46,6 +46,28 @@ async function requestDemo(path, { method = 'GET', signal, body } = {}) {
   return responseBody.data || {}
 }
 
+async function requestDemoForm(path, { signal, formData } = {}) {
+  // 文件上传走 multipart/form-data：不手工设置 Content-Type，交给浏览器自动带 boundary。
+  const response = await fetch(`${DEMO_API_BASE_URL}${path}`, {
+    method: 'POST',
+    body: formData,
+    signal
+  })
+
+  const responseBody = await readJsonBody(response)
+  if (!response.ok || !responseBody?.ok) {
+    const error = responseBody?.error || {}
+    throw new DemoApiError({
+      message: error.message || response.statusText || 'demo api request failed',
+      code: error.code || '',
+      status: response.status,
+      details: error.details ?? null
+    })
+  }
+
+  return responseBody.data || {}
+}
+
 async function readJsonBody(response) {
   // 统一 JSON 解析：即使后端返回非 JSON，也保证调用方拿到对象。
   try {
@@ -87,4 +109,20 @@ export function fetchDemoEvents({ sinceSeq = 0, limit = 50, types = [], signal }
   }
 
   return requestDemo(`/events?${params.toString()}`, { signal })
+}
+
+export function postDemoFileUpload(file, { fileName = '', signal } = {}) {
+  // 提交文件到 demo-backend，由后端代理完成 chunk/register/upload/commit。
+  const formData = new FormData()
+  formData.append('file', file)
+  if (String(fileName || '').trim()) {
+    formData.append('file_name', String(fileName).trim())
+  }
+  return requestDemoForm('/file/upload', { signal, formData })
+}
+
+export function fetchDemoFileDownload({ fileName, signal } = {}) {
+  const params = new URLSearchParams()
+  params.set('file_name', String(fileName || '').trim())
+  return requestDemo(`/file/download?${params.toString()}`, { signal })
 }
