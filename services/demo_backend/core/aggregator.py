@@ -1,6 +1,7 @@
 import threading
 import time
 import os
+import copy
 from dataclasses import dataclass
 from typing import Any
 
@@ -27,9 +28,10 @@ class StateAggregator:
         self._snapshot_seq = 0
         # 每个 source 最近一次有效快照，用于降级回退。
         self._last_valid: dict[str, dict[str, Any]] = {}
-        # 演示优化：动作成功后短时间内对已 stop 的 meta 节点做本地状态覆盖。
-        self._optimistic_dead_meta_until: dict[str, float] = {}
-        self._optimistic_ttl_sec = max(1.0, float(os.getenv("DEMO_OPTIMISTIC_STOP_TTL_SEC", "20")))
+        # 演示优化：动作成功后对已 stop 的 meta 节点做本地状态覆盖，待切主稳定后释放。
+        self._optimistic_dead_meta_state: dict[str, dict[str, Any]] = {}
+        self._optimistic_ttl_sec = max(5.0, float(os.getenv("DEMO_OPTIMISTIC_STOP_TTL_SEC", "90")))
+        self._optimistic_release_stable_cycles = max(1, int(os.getenv("DEMO_OPTIMISTIC_RELEASE_STABLE_CYCLES", "2")))
 
     def aggregate(self) -> AggregationResult:
         # 并发拉取四个上游源。
@@ -41,15 +43,15 @@ class StateAggregator:
         for source, result in upstream.items():
             if result.ok and isinstance(result.data, dict):
                 # 拉取成功：直接使用新值并刷新缓存。
-                merged[source] = result.data
+                merged[source] = copy.deepcopy(result.data)
                 source_health[source] = "ok"
-                self._last_valid[source] = result.data
+                self._last_valid[source] = copy.deepcopy(result.data)
                 continue
 
             # 拉取失败：优先回退到该 source 的最近有效值。
             source_health[source] = "error"
             if source in self._last_valid:
-                merged[source] = self._last_valid[source]
+                merged[source] = copy.deepcopy(self._last_valid[source])
                 warnings.append(f"{source} upstream failed; fallback to last valid snapshot")
             else:
                 # 首次即失败且无缓存时，先给空对象并记录 warning。
@@ -102,10 +104,13 @@ class StateAggregator:
 
         with self._lock:
             if action == "stop":
-                self._optimistic_dead_meta_until[node_id] = time.time() + self._optimistic_ttl_sec
+                self._optimistic_dead_meta_state[node_id] = {
+                    "expires_at": time.time() + self._optimistic_ttl_sec,
+                    "stable_clear_cycles": 0,
+                }
                 return
             if action in {"start", "reload"}:
-                self._optimistic_dead_meta_until.pop(node_id, None)
+                self._optimistic_dead_meta_state.pop(node_id, None)
 
     def _apply_optimistic_overlay(
         self,
@@ -114,18 +119,39 @@ class StateAggregator:
         membership_view: dict[str, Any],
     ) -> None:
         now = time.time()
+        observed_leader = _as_str(leader_view.get("leader")).strip().lower()
+        entry_active_leader = _as_str(entry.get("active_leader_id")).strip().lower()
+
         with self._lock:
-            active_dead_meta_nodes = {
-                node_id
-                for node_id, expires_at in self._optimistic_dead_meta_until.items()
-                if expires_at > now
-            }
-            # 清理已过期覆盖，避免状态无限累积。
-            self._optimistic_dead_meta_until = {
-                node_id: expires_at
-                for node_id, expires_at in self._optimistic_dead_meta_until.items()
-                if expires_at > now
-            }
+            active_dead_meta_nodes: set[str] = set()
+            for node_id in list(self._optimistic_dead_meta_state.keys()):
+                state = self._optimistic_dead_meta_state.get(node_id) or {}
+                expires_at = float(state.get("expires_at", 0.0) or 0.0)
+                stable_cycles = int(state.get("stable_clear_cycles", 0) or 0)
+
+                if expires_at <= now:
+                    self._optimistic_dead_meta_state.pop(node_id, None)
+                    continue
+
+                # 仅当 observed/entry 都明确切到其他 leader 且连续稳定若干轮，才释放覆盖。
+                switched_away_stably = bool(
+                    observed_leader
+                    and entry_active_leader
+                    and observed_leader != node_id
+                    and entry_active_leader != node_id
+                )
+                if switched_away_stably:
+                    stable_cycles += 1
+                else:
+                    stable_cycles = 0
+                state["stable_clear_cycles"] = stable_cycles
+
+                if stable_cycles >= self._optimistic_release_stable_cycles:
+                    self._optimistic_dead_meta_state.pop(node_id, None)
+                    continue
+
+                self._optimistic_dead_meta_state[node_id] = state
+                active_dead_meta_nodes.add(node_id)
 
         if not active_dead_meta_nodes:
             return
@@ -232,15 +258,9 @@ def _normalize_membership(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(membership, dict):
         membership = {}
 
-    # 若上游未给 summary，则根据 membership 现算。
-    summary = payload.get("summary")
-    if not isinstance(summary, dict):
-        summary = _build_summary(membership)
-
-    # 若上游未给 node_type_summary，则按节点前缀现算。
-    node_type_summary = payload.get("node_type_summary")
-    if not isinstance(node_type_summary, dict):
-        node_type_summary = _build_node_type_summary(membership)
+    # summary 与 node_type_summary 每轮按 membership 重算，避免上游缓存与局部覆盖不一致。
+    summary = _build_summary(membership)
+    node_type_summary = _build_node_type_summary(membership)
 
     return {
         "membership": membership,
