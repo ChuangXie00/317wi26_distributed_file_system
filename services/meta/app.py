@@ -38,7 +38,7 @@ def startup_init_repository() -> None:
 
     # 启动前做一次重入探测：若本节点是“恢复的旧 leader”，先回归 follower，避免立即抢主。
     rejoin_probe = probe_cluster_leader_for_rejoin()
-    # 中文：只要能探测到 peer 且“本地可写或已观测到 leader”，就执行重入回归与冷却保护。
+    # 只要能探测到 peer 且“本地可写或已观测到 leader”，就执行重入回归与冷却保护。
     reachable_peer_count = int(rejoin_probe.get("reachable_peer_count", 0))
     observed_leader_id = str(rejoin_probe.get("leader_id", "")).strip().lower()
     observed_leader_epoch = int(rejoin_probe.get("leader_epoch", 0))

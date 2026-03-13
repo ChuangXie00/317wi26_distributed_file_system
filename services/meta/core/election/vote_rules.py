@@ -1,7 +1,7 @@
 from typing import Any, Dict
 
 
-# 中文：纯函数判定当前 candidate 对本节点是否具备投票资格，不直接执行运行时写入。
+# 纯函数判定当前 candidate 对本节点是否具备投票资格，不直接执行运行时写入。
 def decide_incoming_vote(
     *,
     self_node_id: str,
@@ -27,7 +27,7 @@ def decide_incoming_vote(
         }
 
     if current_voted_for and current_voted_for != candidate_id:
-        # 中文：同任期冲突时，允许“已给自己投票”的低优先级节点让票给更高优先级 candidate。
+        # 同任期冲突时，允许“已给自己投票”的低优先级节点让票给更高优先级 candidate。
         can_preempt_self_vote = bool(
             candidate_term == current_term
             and current_voted_for == self_node_id
@@ -61,7 +61,7 @@ def decide_incoming_vote(
     }
 
 
-# 中文：纯函数判定本轮 quorum 收敛结果，供策略层决定后续状态动作。
+# 纯函数判定本轮 quorum 收敛结果，供策略层决定后续状态动作。
 def decide_quorum_round_outcome(
     *,
     candidate_term: int,

@@ -13,7 +13,7 @@ def known_meta_nodes() -> List[str]:
     return sorted(set(get_meta_peer_nodes() + [META_NODE_ID]))
 
 
-# 中文：计算当前集群所需法定票数（quorum），规则为 floor(N/2)+1。
+# 计算当前集群所需法定票数（quorum），规则为 floor(N/2)+1。
 def quorum_required(total_nodes: int) -> int:
     normalized_total = max(1, int(total_nodes))
     return (normalized_total // 2) + 1

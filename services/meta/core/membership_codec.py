@@ -24,7 +24,7 @@ def normalize_meta_role(raw_role: str) -> str:
     return "follower"
 
 
-# 中文：规范化 voted_for 字段，统一节点 ID 表达并兼容空值。
+# 规范化 voted_for 字段，统一节点 ID 表达并兼容空值。
 def normalize_meta_voted_for(raw_voted_for: str) -> str:
     return str(raw_voted_for or "").strip().lower()
 
@@ -54,9 +54,9 @@ def new_meta_membership_entry(
             "role": normalize_meta_role(role),
             "current_leader_id": str(current_leader_id or "").strip().lower(),
             "leader_epoch": max(0, int(leader_epoch)),
-            # 中文：quorum 任期号，优先使用 current_term；历史数据回落到 leader_epoch。
+            # quorum 任期号，优先使用 current_term；历史数据回落到 leader_epoch。
             "current_term": max(0, int(current_term)),
-            # 中文：quorum 当前任期已投票对象（空字符串表示未投票）。
+            # quorum 当前任期已投票对象（空字符串表示未投票）。
             "voted_for": normalize_meta_voted_for(voted_for),
             "lamport": max(0, int(lamport)),
             "writable_leader": bool(writable_leader),

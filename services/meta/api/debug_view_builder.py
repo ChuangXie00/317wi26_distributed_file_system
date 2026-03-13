@@ -34,7 +34,7 @@ def build_meta_cluster_view(snapshot: Dict[str, Dict[str, Any]]) -> List[Dict[st
                 "role": str(entry.get("role", "follower")).strip().lower(),
                 "current_leader_id": str(entry.get("current_leader_id", "")).strip().lower(),
                 "leader_epoch": max(0, safe_int(entry.get("leader_epoch", 0))),
-                # 中文：兼容旧数据，若缺少 current_term 则回退到 leader_epoch。
+                # 兼容旧数据，若缺少 current_term 则回退到 leader_epoch。
                 "current_term": max(0, safe_int(entry.get("current_term", entry.get("leader_epoch", 0)))),
                 "voted_for": str(entry.get("voted_for", "")).strip().lower(),
                 "lamport": max(0, safe_int(entry.get("lamport", 0))),

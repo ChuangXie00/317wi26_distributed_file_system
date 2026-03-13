@@ -27,7 +27,7 @@ from .takeover_scheduler import (
 )
 
 
-# 中文：保留旧模块私有函数名，避免重构过程中的隐式依赖断裂。
+# 保留旧模块私有函数名，避免重构过程中的隐式依赖断裂。
 _update_runtime = update_runtime
 _record_error = record_error
 

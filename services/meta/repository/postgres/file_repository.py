@@ -53,7 +53,7 @@ class FileRepository:
 
         with self._connections.connection() as conn:
             with conn.cursor() as cur:
-                # 中文：同一个 namespace:file_name 提交强制串行，避免并发覆盖。
+                # 同一个 namespace:file_name 提交强制串行，避免并发覆盖。
                 lock_key = f"{ns}:{fn}"
                 cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s));", (lock_key,))
 

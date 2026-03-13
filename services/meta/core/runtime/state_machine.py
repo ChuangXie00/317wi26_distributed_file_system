@@ -16,7 +16,7 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-# 中文：将 Unix 时间戳转成 UTC ISO 字符串，便于 debug 观察冷却结束时间点。
+# 将 Unix 时间戳转成 UTC ISO 字符串，便于 debug 观察冷却结束时间点。
 def _iso_from_ts(ts: float) -> str:
     normalized_ts = float(ts)
     if normalized_ts <= 0:
@@ -32,7 +32,7 @@ def _normalize_role(raw_role: str) -> str:
     return "follower"
 
 
-# 中文：规范化节点 ID，用于投票记录与 leader 标识字段统一格式。
+# 规范化节点 ID，用于投票记录与 leader 标识字段统一格式。
 def _normalize_node_id(raw_node_id: str) -> str:
     return str(raw_node_id or "").strip().lower()
 
@@ -42,7 +42,7 @@ _INITIAL_ROLE = _normalize_role(META_BOOTSTRAP_ROLE)
 # 初始化 leader 与 epoch，leader 默认以 epoch=1 启动。
 _INITIAL_LEADER_ID = META_NODE_ID if _INITIAL_ROLE == "leader" else ""
 _INITIAL_EPOCH = 1 if _INITIAL_ROLE == "leader" else 0
-# 中文：在 quorum 尚未接入前，term 默认跟随 epoch 初始化，保持语义兼容。
+# 在 quorum 尚未接入前，term 默认跟随 epoch 初始化，保持语义兼容。
 _INITIAL_TERM = _INITIAL_EPOCH
 
 
@@ -53,9 +53,9 @@ _RUNTIME_STATE: Dict[str, Any] = {
     "role": _INITIAL_ROLE,
     "current_leader_id": _INITIAL_LEADER_ID,
     "leader_epoch": _INITIAL_EPOCH,
-    # 中文：quorum 任期号；当前阶段先与 leader_epoch 对齐，后续由 quorum 投票链路驱动。
+    # quorum 任期号；当前阶段先与 leader_epoch 对齐，后续由 quorum 投票链路驱动。
     "current_term": _INITIAL_TERM,
-    # 中文：当前任期内本节点已投票对象（空字符串表示尚未投票）。
+    # 当前任期内本节点已投票对象（空字符串表示尚未投票）。
     "voted_for": "",
     "lamport_clock": 0,
     "last_lamport_event": "",
@@ -67,10 +67,10 @@ _RUNTIME_STATE: Dict[str, Any] = {
     "last_role_change_reason": "bootstrap",
     "last_epoch_change_at": _now_iso(),
     "last_epoch_change_reason": "bootstrap",
-    # 中文：term 变更审计信息，便于追踪任期推进来源。
+    # term 变更审计信息，便于追踪任期推进来源。
     "last_term_change_at": _now_iso(),
     "last_term_change_reason": "bootstrap",
-    # 中文：投票变更审计信息，便于排查 quorum 投票行为。
+    # 投票变更审计信息，便于排查 quorum 投票行为。
     "last_vote_change_at": "",
     "last_vote_change_reason": "",
     # 记录最近一次“我让位给更高优先级节点”的观测信息，便于排查三节点选举抖动。
@@ -78,7 +78,7 @@ _RUNTIME_STATE: Dict[str, Any] = {
     "last_election_deferred_reason": "",
     "last_election_deferred_epoch": 0,
     "last_election_deferred_to": [],
-    # 中文：重入 follower 后的选举冷却窗口，避免恢复节点立刻抢主。
+    # 重入 follower 后的选举冷却窗口，避免恢复节点立刻抢主。
     "last_rejoin_as_follower_at": "",
     "last_rejoin_as_follower_reason": "",
     "rejoin_election_holdoff_until_ts": 0.0,
@@ -92,7 +92,7 @@ def get_runtime_snapshot() -> Dict[str, Any]:
         return copy.deepcopy(_RUNTIME_STATE)
 
 
-# 中文：读取重入冷却状态；active=true 时本节点不应主动发起本地选举。
+# 读取重入冷却状态；active=true 时本节点不应主动发起本地选举。
 def get_rejoin_election_holdoff(now_ts: Optional[float] = None) -> Dict[str, Any]:
     check_ts = time.time() if now_ts is None else float(now_ts)
     with _RUNTIME_LOCK:
@@ -128,13 +128,13 @@ def get_leader_epoch() -> int:
         return int(_RUNTIME_STATE.get("leader_epoch", 0))
 
 
-# 中文：读取当前任期（term），供 quorum 选主链路使用。
+# 读取当前任期（term），供 quorum 选主链路使用。
 def get_current_term() -> int:
     with _RUNTIME_LOCK:
         return int(_RUNTIME_STATE.get("current_term", 0))
 
 
-# 中文：读取当前任期内的投票对象；空字符串表示尚未投票。
+# 读取当前任期内的投票对象；空字符串表示尚未投票。
 def get_voted_for() -> str:
     with _RUNTIME_LOCK:
         return str(_RUNTIME_STATE.get("voted_for", ""))
@@ -168,12 +168,12 @@ def _set_epoch_unlocked(epoch: int, reason: str) -> bool:
     _RUNTIME_STATE["leader_epoch"] = normalized
     _RUNTIME_STATE["last_epoch_change_at"] = _now_iso()
     _RUNTIME_STATE["last_epoch_change_reason"] = str(reason)
-    # 中文：在 Bully/旧路径下保持 term 与 epoch 同步，避免双时间轴漂移。
+    # 在 Bully/旧路径下保持 term 与 epoch 同步，避免双时间轴漂移。
     _set_term_unlocked(normalized, reason=f"sync_with_epoch:{reason}")
     return True
 
 
-# 中文：在锁内更新 term；仅允许非递减推进，防止旧任期回退覆盖。
+# 在锁内更新 term；仅允许非递减推进，防止旧任期回退覆盖。
 def _set_term_unlocked(term: int, reason: str, *, allow_same: bool = True) -> bool:
     normalized = max(0, int(term))
     current_term = int(_RUNTIME_STATE.get("current_term", 0))
@@ -189,7 +189,7 @@ def _set_term_unlocked(term: int, reason: str, *, allow_same: bool = True) -> bo
     return True
 
 
-# 中文：在锁内记录本任期投票对象；用于 quorum 的“一任期一票”约束。
+# 在锁内记录本任期投票对象；用于 quorum 的“一任期一票”约束。
 def _set_voted_for_unlocked(voted_for: str, reason: str) -> bool:
     normalized_voted_for = _normalize_node_id(voted_for)
     if str(_RUNTIME_STATE.get("voted_for", "")) == normalized_voted_for:

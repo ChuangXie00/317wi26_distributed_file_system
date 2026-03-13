@@ -53,22 +53,27 @@ def split_shell_words(command: str, fallback: List[str]) -> List[str]:
 
 @dataclass
 class ControllerConfig:
+    # 集群探测与 leader 查询参数。
     meta_nodes: List[str]
     meta_internal_port: int
     leader_query_path: str
+    # 切换节奏控制参数。
     refresh_interval_sec: float
     switch_debounce_sec: float
     switch_cooldown_sec: float
     request_timeout_sec: float
+    # 默认目标与动态配置落盘路径。
     default_leader_id: str
     upstream_conf_path: str
     status_path: str
+    # nginx 变更执行参数。
     enable_nginx_reload: bool
     nginx_test_cmd: List[str]
     nginx_reload_cmd: List[str]
 
     @classmethod
     def from_env(cls) -> "ControllerConfig":
+        # 读取并规范化 meta 节点列表，避免空值或重复节点影响探测结果。
         meta_nodes = parse_csv_nodes(os.getenv("ENTRY_META_NODES", "meta-01,meta-02,meta-03"))
         default_leader = normalize_node_id(os.getenv("ENTRY_DEFAULT_LEADER_ID", "meta-01"))
         if not meta_nodes:
@@ -76,10 +81,12 @@ class ControllerConfig:
         if default_leader and default_leader not in meta_nodes:
             meta_nodes = [default_leader] + meta_nodes
 
+        # 允许通过环境变量覆盖 leader 查询路径，默认走内部统一出口。
         query_path = str(os.getenv("ENTRY_LEADER_QUERY_PATH", "/internal/current_leader")).strip() or "/internal/current_leader"
         if not query_path.startswith("/"):
             query_path = f"/{query_path}"
 
+        # nginx 执行命令支持配置化，便于本地与容器环境复用同一控制器。
         nginx_test_cmd = split_shell_words(os.getenv("ENTRY_NGINX_TEST_CMD", "nginx -t"), ["nginx", "-t"])
         nginx_reload_cmd = split_shell_words(
             os.getenv("ENTRY_NGINX_RELOAD_CMD", "nginx -s reload"),
@@ -108,21 +115,26 @@ class ControllerConfig:
 class LeaderSwitchController:
     def __init__(self, config: ControllerConfig) -> None:
         self.config = config
+        # active_* 代表当前实际生效的路由目标。
         self.active_leader_id = config.default_leader_id
         self.active_since_ts = 0.0
+        # pending_* 代表候选目标，需通过防抖与冷却后才可生效。
         self.pending_leader_id = ""
         self.pending_since_ts = 0.0
+        # 最近一次切换与决策结果，供 /debug/entry 直接观测。
         self.last_switch_at_ts = 0.0
         self.last_switch_reason = "bootstrap"
         self.last_decision = "bootstrap"
         self.last_error = ""
         self.poll_seq = 0
 
+        # 启动时尽量复用上次状态，避免重启后立即误切。
         self._load_previous_status()
         self._ensure_upstream_file_initialized()
         self._write_status([], [], {})
 
     def run(self, once: bool = False) -> None:
+        # 常驻循环：探测 -> 决策 -> 落盘，按固定节拍执行。
         while True:
             started_at = time.time()
             self._run_once()
@@ -135,8 +147,10 @@ class LeaderSwitchController:
     def _run_once(self) -> None:
         self.poll_seq += 1
         now_ts = time.time()
+        # 先收集观测样本，再按统一规则选候选 leader。
         success_items, error_items = self._probe_meta_nodes()
         candidate_leader_id, candidate_epoch, selection_reason = self._select_candidate_leader(success_items)
+        # 切换决策会处理防抖、冷却和 reload 成功性。
         decision = self._decide_switch(now_ts, candidate_leader_id, candidate_epoch, selection_reason)
         self._write_status(success_items, error_items, decision)
 
@@ -147,6 +161,7 @@ class LeaderSwitchController:
         try:
             payload = json.loads(status_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
+            # 状态文件损坏时按冷启动处理，不中断主流程。
             return
         if not isinstance(payload, dict):
             return
@@ -168,6 +183,7 @@ class LeaderSwitchController:
             query_url = f"http://{node_id}:{self.config.meta_internal_port}{self.config.leader_query_path}"
             started = time.time()
             try:
+                # 每个节点独立探测，单点超时不会拖垮整轮决策。
                 request = Request(query_url, method="GET")
                 with urlopen(request, timeout=self.config.request_timeout_sec) as response:
                     body_raw = response.read()
@@ -200,6 +216,7 @@ class LeaderSwitchController:
                     {
                         "probe_node_id": node_id,
                         "query_url": query_url,
+                        # 保留错误明细，便于定位 DNS、连接超时或接口异常。
                         "error": str(exc),
                         "latency_ms": int((time.time() - started) * 1000),
                     }
@@ -218,11 +235,12 @@ class LeaderSwitchController:
             ranked_candidates.append((leader_epoch, leader_id))
 
         if ranked_candidates:
+            # 优先更高 epoch；同 epoch 下按 leader_id 稳定收敛，避免随机切换。
             ranked_candidates.sort(key=lambda pair: (pair[0], pair[1]), reverse=True)
             candidate_epoch, candidate_leader = ranked_candidates[0]
             return candidate_leader, candidate_epoch, "best_epoch_leader"
 
-        # 中文：当本轮探测没有可用 leader 视图时，优先维持当前流量目标，避免入口抖动。
+        # 本轮无有效 leader 观测时，保持现有目标以降低抖动风险。
         fallback_leader = self.active_leader_id or self.config.default_leader_id
         return fallback_leader, 0, "fallback_to_active_or_default"
 
@@ -241,6 +259,7 @@ class LeaderSwitchController:
             "switch_blocked_by": "",
         }
 
+        # 候选与当前一致时清空 pending，保持稳定状态。
         if candidate_leader_id == self.active_leader_id:
             self.pending_leader_id = ""
             self.pending_since_ts = 0.0
@@ -248,7 +267,7 @@ class LeaderSwitchController:
             decision["decision"] = self.last_decision
             return decision
 
-        # 中文：候选 leader 首次出现时先进入 pending，等待防抖窗口结束再切流。
+        # 首次观察到新候选时只进入 pending，不立即切流。
         if candidate_leader_id != self.pending_leader_id:
             self.pending_leader_id = candidate_leader_id
             self.pending_since_ts = now_ts
@@ -257,6 +276,7 @@ class LeaderSwitchController:
             decision["pending_elapsed_sec"] = 0.0
             return decision
 
+        # 防抖窗口内仅记录候选稳定时间，避免瞬时波动触发切换。
         pending_elapsed = max(0.0, now_ts - self.pending_since_ts)
         decision["pending_elapsed_sec"] = round(pending_elapsed, 3)
         if pending_elapsed < self.config.switch_debounce_sec:
@@ -265,6 +285,7 @@ class LeaderSwitchController:
             decision["switch_blocked_by"] = "debounce"
             return decision
 
+        # 冷却窗口限制切换频率，防止连续主变更放大入口抖动。
         cooldown_elapsed = max(0.0, now_ts - self.last_switch_at_ts) if self.last_switch_at_ts > 0 else float("inf")
         decision["cooldown_elapsed_sec"] = round(cooldown_elapsed, 3) if cooldown_elapsed != float("inf") else None
         if cooldown_elapsed < self.config.switch_cooldown_sec:
@@ -273,6 +294,7 @@ class LeaderSwitchController:
             decision["switch_blocked_by"] = "cooldown"
             return decision
 
+        # 真正切换时需要先落盘 upstream，再执行 nginx 校验与 reload。
         switched, detail = self._apply_switch(candidate_leader_id)
         decision["switched"] = switched
         decision["switch_result"] = detail
@@ -295,12 +317,14 @@ class LeaderSwitchController:
 
     def _apply_switch(self, leader_id: str) -> Tuple[bool, str]:
         try:
+            # 先尝试更新目标配置；内容不变时视为幂等成功。
             changed = self._write_upstream_conf(leader_id)
             if not changed:
                 return True, "target_unchanged"
             if not self.config.enable_nginx_reload:
                 return True, "reload_disabled"
 
+            # reload 前先做配置检查，避免坏配置直接打断入口流量。
             self._run_cmd(self.config.nginx_test_cmd)
             self._run_cmd(self.config.nginx_reload_cmd)
             return True, "nginx_reloaded"
@@ -325,6 +349,7 @@ class LeaderSwitchController:
         if current == content:
             return False
 
+        # 采用临时文件 + 原子替换，避免并发读取时出现半写入内容。
         temp_path = conf_path.with_suffix(".tmp")
         temp_path.write_text(content, encoding="utf-8")
         os.replace(temp_path, conf_path)
@@ -334,6 +359,7 @@ class LeaderSwitchController:
         if self.active_since_ts <= 0:
             self.active_since_ts = time.time()
         try:
+            # 启动阶段先写默认上游，确保 nginx 在首次请求前就有可用目标。
             self._write_upstream_conf(self.active_leader_id)
         except Exception as exc:  # pylint: disable=broad-except
             self.last_error = str(exc)
@@ -344,6 +370,7 @@ class LeaderSwitchController:
         error_items: List[Dict[str, Any]],
         decision: Dict[str, Any],
     ) -> None:
+        # 每轮决策都落盘，便于 /debug/entry 实时观测切换状态与探测细节。
         status_path = Path(self.config.status_path)
         status_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
@@ -382,6 +409,7 @@ class LeaderSwitchController:
     def _run_cmd(command: List[str]) -> None:
         completed = subprocess.run(command, capture_output=True, text=True, check=False)
         if completed.returncode != 0:
+            # 拼接 stdout/stderr 便于排查 reload 失败根因。
             raise RuntimeError(
                 f"command failed: {' '.join(command)}; "
                 f"stdout={completed.stdout.strip()}; stderr={completed.stderr.strip()}"
@@ -390,6 +418,7 @@ class LeaderSwitchController:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="meta-entry leader switch controller")
+    # 用于容器启动时做一次初始化写入，也便于本地快速验证单轮行为。
     parser.add_argument("--once", action="store_true", help="run one polling cycle and exit")
     return parser.parse_args()
 

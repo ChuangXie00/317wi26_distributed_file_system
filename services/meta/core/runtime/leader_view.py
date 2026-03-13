@@ -59,7 +59,7 @@ def promote_self_to_leader(epoch: int, reason: str) -> Dict[str, Any]:
         normalized_epoch = max(int(_RUNTIME_STATE.get("leader_epoch", 0)), max(0, int(epoch)))
         _set_epoch_unlocked(normalized_epoch, reason=f"promote_leader:{reason}")
         _RUNTIME_STATE["current_leader_id"] = META_NODE_ID
-        # 中文：当选 leader 后清空重入冷却标记，避免 debug 误导。
+        # 当选 leader 后清空重入冷却标记，避免 debug 误导。
         _RUNTIME_STATE["rejoin_election_holdoff_until_ts"] = 0.0
         _RUNTIME_STATE["rejoin_election_holdoff_until"] = ""
         _set_role_unlocked("leader", reason=f"promote_leader:{reason}")
@@ -147,7 +147,7 @@ def force_rejoin_as_follower(reason: str, observed_leader_id: str = "", observed
             _RUNTIME_STATE["current_leader_id"] = ""
 
         _set_role_unlocked("follower", reason=f"rejoin_as_follower:{reason}")
-        # 中文：重入后开启选举冷却，优先等待现任 leader 的心跳/协调收敛。
+        # 重入后开启选举冷却，优先等待现任 leader 的心跳/协调收敛。
         holdoff_sec = max(0.0, float(META_REJOIN_ELECTION_HOLDOFF_SEC))
         holdoff_until_ts = time.time() + holdoff_sec if holdoff_sec > 0 else 0.0
         _RUNTIME_STATE["last_rejoin_as_follower_at"] = _now_iso()

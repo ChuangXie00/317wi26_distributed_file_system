@@ -54,6 +54,7 @@ def internal_state_snapshot() -> dict:
 
 @router.get("/internal/current_leader", response_model=CurrentLeaderResp)
 def internal_current_leader() -> CurrentLeaderResp:
+    # entry 通过该接口轮询集群各节点，收敛“当前 leader”后再更新转发目标。
     result = process_internal_current_leader()
     return CurrentLeaderResp(**result)
 

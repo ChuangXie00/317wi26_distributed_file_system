@@ -9,14 +9,14 @@ from .quorum_strategy import QuorumElectionStrategy
 from .transport import post_json
 
 
-# 中文：兼容旧模块的私有工具函数命名，避免外部隐式引用在重构后失效。
+# 兼容旧模块的私有工具函数命名，避免外部隐式引用在重构后失效。
 _post_json = post_json
 _normalize_node_id = normalize_node_id
 _known_meta_nodes = known_meta_nodes
 _quorum_required = quorum_required
 
 
-# 中文：策略工厂映射，统一管理不同选主模式对应的策略实现。
+# 策略工厂映射，统一管理不同选主模式对应的策略实现。
 _ELECTION_STRATEGY_FACTORIES: Dict[str, Callable[[], ElectionStrategy]] = {
     "bully": BullyElectionStrategy,
     "quorum": QuorumElectionStrategy,

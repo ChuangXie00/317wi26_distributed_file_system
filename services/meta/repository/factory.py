@@ -70,7 +70,7 @@ _REPOSITORY: Optional[PostgresMetadataRepository] = None
 
 
 def get_repository() -> PostgresMetadataRepository:
-    # 中文：仓储对象单例；但每次方法调用仍会创建新连接和新事务。
+    # 仓储对象单例；但每次方法调用仍会创建新连接和新事务。
     global _REPOSITORY
     if _REPOSITORY is None:
         _REPOSITORY = PostgresMetadataRepository(build_pg_conn_kwargs(), DEFAULT_NAMESPACE)

@@ -14,7 +14,7 @@ from .state_store import now_iso, read_runtime, record_error, update_runtime
 _ELECTION_LOCK = threading.Lock()
 
 
-# 中文：quorum 模式下按节点顺序施加确定性超时偏移，打破同周期 timeout 导致的重复平票/抖动。
+# quorum 模式下按节点顺序施加确定性超时偏移，打破同周期 timeout 导致的重复平票/抖动。
 def _quorum_timeout_offset_sec() -> float:
     if LEADER_ELECTION_MODE != "quorum":
         return 0.0
@@ -28,11 +28,11 @@ def _quorum_timeout_offset_sec() -> float:
     except ValueError:
         node_index = 0
 
-    # 中文：按 3.5s 级差错开，确保在 3s 轮询粒度下进入不同选举窗口。
+    # 按 3.5s 级差错开，确保在 3s 轮询粒度下进入不同选举窗口。
     return float(node_index) * 3.5
 
 
-# 中文：纯函数评估当前是否应该触发 timeout takeover，便于后续单测覆盖调度策略。
+# 纯函数评估当前是否应该触发 timeout takeover，便于后续单测覆盖调度策略。
 def should_takeover_by_timeout(
     *,
     role: str,
@@ -58,7 +58,7 @@ def should_takeover_by_timeout(
 
 # 执行一次 takeover 流程（超时触发或内部预抢占触发）。
 def trigger_takeover(reason: str) -> Dict[str, Any]:
-    # 中文：重入冷却期内拒绝本地主动选举，避免恢复节点立即抢主。
+    # 重入冷却期内拒绝本地主动选举，避免恢复节点立即抢主。
     rejoin_holdoff = get_rejoin_election_holdoff()
     if bool(rejoin_holdoff.get("active", False)):
         skipped_result = {
@@ -129,10 +129,10 @@ def _maybe_takeover_by_timeout() -> None:
 
     reference_ts = last_ts if last_ts > 0 else started_ts
     elapsed = max(0.0, time.time() - reference_ts)
-    # 中文：quorum 模式使用“基础超时 + 节点偏移”作为生效阈值，避免多节点同拍触发选举。
+    # quorum 模式使用“基础超时 + 节点偏移”作为生效阈值，避免多节点同拍触发选举。
     effective_timeout_sec = float(META_LEADER_HEARTBEAT_TIMEOUT_SEC + _quorum_timeout_offset_sec())
 
-    # 中文：重入冷却期内不执行 timeout takeover，优先等待 leader 心跳恢复。
+    # 重入冷却期内不执行 timeout takeover，优先等待 leader 心跳恢复。
     rejoin_holdoff = get_rejoin_election_holdoff()
     holdoff_active = bool(rejoin_holdoff.get("active", False))
     since_last_takeover_sec = -1.0 if last_takeover_ts <= 0 else max(0.0, time.time() - last_takeover_ts)

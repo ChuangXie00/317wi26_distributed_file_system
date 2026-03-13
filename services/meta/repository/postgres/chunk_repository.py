@@ -85,7 +85,7 @@ class ChunkRepository:
         with self._connections.connection() as conn:
             with conn.cursor() as cur:
                 chunk_id = self._ensure_chunk_row(cur, fp)
-                # 中文：直接重写副本集合，保证最终副本列表与当前策略一致。
+                # 直接重写副本集合，保证最终副本列表与当前策略一致。
                 cur.execute("DELETE FROM dfs_meta.chunk_replicas WHERE chunk_id = %s;", (chunk_id,))
                 for node_id in normalized:
                     cur.execute(

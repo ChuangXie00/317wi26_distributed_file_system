@@ -24,7 +24,7 @@ from .vote_rules import decide_incoming_vote, decide_quorum_round_outcome
 
 # Quorum 策略实现；通过 vote 请求统计多数票并在达 quorum 时晋升 leader。
 class QuorumElectionStrategy:
-    # 中文：发起 quorum 选举：候选节点先自投票，再向 peers 请求投票，达到多数后当选 leader。
+    # 发起 quorum 选举：候选节点先自投票，再向 peers 请求投票，达到多数后当选 leader。
     def trigger_election(self, reason: str) -> Dict[str, Any]:
         round_info = begin_election_round(reason=reason)
         candidate_epoch = int(round_info["epoch"])
@@ -81,7 +81,7 @@ class QuorumElectionStrategy:
             quorum=quorum,
         )
         if round_outcome == "defer_higher_term":
-            # 中文：若观测到更高 term，即使当前已拿到票也必须让位，避免旧 term 误当选。
+            # 若观测到更高 term，即使当前已拿到票也必须让位，避免旧 term 误当选。
             observe_term(
                 term=max_observed_term,
                 reason=f"quorum_higher_term_observed:{reason}",
@@ -109,7 +109,7 @@ class QuorumElectionStrategy:
             }
 
         if round_outcome == "elected":
-            # 中文：满足多数票后晋升 leader，并沿用既有 coordinator 广播链路收敛全局视图。
+            # 满足多数票后晋升 leader，并沿用既有 coordinator 广播链路收敛全局视图。
             promote_info = promote_self_to_leader(epoch=candidate_epoch, reason=f"quorum_win:{reason}")
             coordinator_lamport = tick_lamport(event="send_coordinator")
             broadcast_result = broadcast_coordinator(
@@ -133,7 +133,7 @@ class QuorumElectionStrategy:
                 "broadcast": broadcast_result,
             }
 
-        # 中文：未达到法定票数则结束本轮，回退 follower，等待下一次 timeout/触发重试。
+        # 未达到法定票数则结束本轮，回退 follower，等待下一次 timeout/触发重试。
         defer_state = mark_election_deferred(
             epoch=candidate_epoch,
             reason=f"quorum_not_reached:{reason}",
@@ -153,7 +153,7 @@ class QuorumElectionStrategy:
             "defer_state": defer_state,
         }
 
-    # 中文：当前提交仅保留接口占位，避免在接入前误用 quorum 入站处理。
+    # 当前提交仅保留接口占位，避免在接入前误用 quorum 入站处理。
     def handle_incoming_election(
         self,
         candidate_id: str,
@@ -162,7 +162,7 @@ class QuorumElectionStrategy:
         reason: str,
     ) -> Dict[str, Any]:
         tick_lamport(event="recv_legacy_election_in_quorum", incoming_lamport=int(lamport))
-        # 中文：quorum 模式不处理 Bully election 请求，返回“可忽略”的稳定响应，避免 500 噪音。
+        # quorum 模式不处理 Bully election 请求，返回“可忽略”的稳定响应，避免 500 噪音。
         resp_lamport = tick_lamport(event="send_legacy_election_ack_in_quorum")
         return {
             "status": "ok",
@@ -175,7 +175,7 @@ class QuorumElectionStrategy:
             "lamport": resp_lamport,
         }
 
-    # 中文：处理 quorum 投票请求；对旧 term 拒绝授票，对新 term 先降级再按“一任期一票”授票。
+    # 处理 quorum 投票请求；对旧 term 拒绝授票，对新 term 先降级再按“一任期一票”授票。
     def handle_incoming_vote_request(
         self,
         candidate_id: str,
@@ -225,7 +225,7 @@ class QuorumElectionStrategy:
         else:
             granted = bool(decision.get("precheck_granted", False))
 
-        # 中文：若 candidate 透传了更高 epoch，保守抬升本地 epoch，防止旧视图写入路径延迟收敛。
+        # 若 candidate 透传了更高 epoch，保守抬升本地 epoch，防止旧视图写入路径延迟收敛。
         if normalized_epoch > get_leader_epoch():
             observe_candidate_epoch(
                 candidate_epoch=normalized_epoch,

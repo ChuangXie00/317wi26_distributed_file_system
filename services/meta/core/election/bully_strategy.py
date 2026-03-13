@@ -23,7 +23,7 @@ from .transport import post_json
 
 # Bully 策略实现（按 node_id 字典序比较优先级）。
 class BullyElectionStrategy:
-    # 中文：按 Bully 规则发起选举，只向更高优先级节点发起请求。
+    # 按 Bully 规则发起选举，只向更高优先级节点发起请求。
     def trigger_election(self, reason: str) -> Dict[str, Any]:
         round_info = begin_election_round(reason=reason)
         candidate_epoch = int(round_info["epoch"])
@@ -83,7 +83,7 @@ class BullyElectionStrategy:
             "broadcast": broadcast_result,
         }
 
-    # 中文：按 Bully 规则处理入站 election 请求，并决定是否建议本地预抢占选举。
+    # 按 Bully 规则处理入站 election 请求，并决定是否建议本地预抢占选举。
     def handle_incoming_election(
         self,
         candidate_id: str,
@@ -127,7 +127,7 @@ class BullyElectionStrategy:
             and current_epoch >= normalized_epoch
             and current_leader_id >= normalized_candidate_id
         )
-        # 中文：重入冷却期内不主动抢主，优先等待现任 leader 继续收敛。
+        # 重入冷却期内不主动抢主，优先等待现任 leader 继续收敛。
         rejoin_holdoff = get_rejoin_election_holdoff()
         rejoin_guard_active = bool(rejoin_holdoff.get("active", False))
         should_start_local_election = bool(
@@ -151,7 +151,7 @@ class BullyElectionStrategy:
             "lamport": resp_lamport,
         }
 
-    # 中文：Bully 模式下不参与 quorum 投票，返回协议级“已处理但不支持”。
+    # Bully 模式下不参与 quorum 投票，返回协议级“已处理但不支持”。
     def handle_incoming_vote_request(
         self,
         candidate_id: str,

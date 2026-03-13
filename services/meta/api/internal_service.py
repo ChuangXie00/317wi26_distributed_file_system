@@ -72,6 +72,7 @@ def process_internal_replicate_state(snapshot: Dict[str, object]) -> Dict[str, o
 
 # 输出当前节点观测到的 leader 视图，供 entry 做跨节点收敛判断。
 def process_internal_current_leader() -> Dict[str, object]:
+    # 读取运行时快照，作为 entry 路由决策的统一输入。
     runtime = get_runtime_snapshot()
     return {
         "status": "ok",
@@ -81,9 +82,10 @@ def process_internal_current_leader() -> Dict[str, object]:
         "leader_epoch": int(runtime.get("leader_epoch", 0)),
         "current_term": int(runtime.get("current_term", 0)),
         "voted_for": str(runtime.get("voted_for", "")),
+        # 该字段用于让 entry 快速识别“谁正在提供可写能力”。
         "writable_leader": bool(is_writable_leader()),
         "lamport": int(runtime.get("lamport_clock", get_lamport_clock())),
-        # 中文：返回本节点生成观测快照的时间，便于 entry 判断数据新鲜度。
+        # 返回观测快照生成时间，便于 entry 判断数据新鲜度。
         "observed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
 
@@ -147,6 +149,7 @@ def process_storage_heartbeat(node_id: str) -> Dict[str, str]:
     holder: Dict[str, str] = {"observed_at": ""}
 
     def _mutator(state: State) -> bool:
+        # 先刷新超时状态，再写入本次心跳，保证 last_heartbeat_at 语义稳定。
         changed = refresh_storage_membership(state)
         if mark_storage_heartbeat(state, normalized_node_id, min_interval_sec=HEARTBEAT_WRITE_MIN_INTERVAL_SEC):
             changed = True

@@ -8,7 +8,7 @@ class PostgresSchemaManager:
         self._connections = connection_factory
 
     def init_schema(self) -> None:
-        # 中文：DDL 统一放到 schema 管理器，业务仓储里不再混建表语句。
+        # DDL 统一放到 schema 管理器，业务仓储里不再混建表语句。
         with self._connections.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("CREATE SCHEMA IF NOT EXISTS dfs_meta;")
