@@ -10,7 +10,7 @@ defineProps({
 <template>
   <div class="title-wrap">
     <p class="eyebrow">DFS Demo Console</p>
-    <h1 class="title">Single Page Drill Console</h1>
+    <h1 class="title">DFS</h1>
     <p class="phase">{{ phaseLabel }}</p>
   </div>
 </template>

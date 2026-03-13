@@ -56,7 +56,7 @@ function requestAction(action) {
   <article class="panel">
     <header class="panel__head">
       <h3 class="panel__title">Action Bar</h3>
-      <span class="panel__meta">危险动作需二次确认</span>
+      <span class="panel__meta"></span>
     </header>
 
     <div class="panel__body subgrid">
@@ -93,7 +93,7 @@ function requestAction(action) {
       </div>
 
       <p class="empty-state">
-        {{ actionStore.state.submitting ? '动作执行中，请等待回执…' : '提交后将进入确认弹窗。' }}
+        {{ actionStore.state.submitting ? 'please waiting…' : '' }}
       </p>
     </div>
   </article>

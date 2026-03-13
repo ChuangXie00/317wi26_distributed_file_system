@@ -23,6 +23,8 @@ def _replication_runtime_loop() -> None:
     event = stop_event()
 
     while not event.is_set():
+        # 记录本轮开始时间，用于“按耗时补偿”的 sleep，避免周期被慢请求持续拉长。
+        loop_started = time.monotonic()
         if is_writable_leader():
             _send_heartbeat_to_peers()
             now_monotonic = time.monotonic()
@@ -32,7 +34,9 @@ def _replication_runtime_loop() -> None:
         else:
             _maybe_takeover_by_timeout()
 
-        event.wait(hb_interval)
+        elapsed = max(0.0, time.monotonic() - loop_started)
+        sleep_sec = max(0.05, hb_interval - elapsed)
+        event.wait(sleep_sec)
 
 
 # 启动复制/接管运行时线程。

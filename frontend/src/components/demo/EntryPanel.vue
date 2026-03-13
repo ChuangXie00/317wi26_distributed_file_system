@@ -6,7 +6,7 @@ import EntryTargetCard from './entry/EntryTargetCard.vue'
   <section class="panel reveal" style="--delay: 160ms">
     <header class="panel__head">
       <h2 class="panel__title">Entry Panel</h2>
-      <span class="panel__meta">active leader 指向空态</span>
+      <span class="panel__meta"></span>
     </header>
     <div class="panel__body">
       <EntryTargetCard />

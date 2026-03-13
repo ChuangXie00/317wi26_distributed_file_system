@@ -2,6 +2,7 @@ import { reactive } from 'vue'
 
 import { fetchDemoState } from '../api/demoApi.js'
 
+// 前台页面默认轮询间隔：按你的诉求调整为每 2 秒拉取一次 /state。
 const DEFAULT_VISIBLE_POLL_MS = 2000
 const DEFAULT_HIDDEN_POLL_MS = 5000
 

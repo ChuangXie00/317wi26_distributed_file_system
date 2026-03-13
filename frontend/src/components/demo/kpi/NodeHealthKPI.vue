@@ -22,7 +22,7 @@ const summary = computed(
     <p class="kpi-tile__label">Node Health</p>
     <p class="kpi-tile__value">{{ summary.alive }} / {{ summary.total }}</p>
     <p class="empty-state">
-      suspected={{ summary.suspected }} · dead={{ summary.dead }}
+      suspected={{ summary.suspected }}, dead={{ summary.dead }}
     </p>
   </article>
 </template>

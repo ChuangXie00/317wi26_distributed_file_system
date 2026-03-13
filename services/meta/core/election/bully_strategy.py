@@ -4,6 +4,7 @@ from urllib.error import HTTPError, URLError
 
 from ..config import META_NODE_ID, build_meta_base_url, get_meta_peer_nodes
 from ..runtime import (
+    align_epoch_floor,
     begin_election_round,
     get_current_leader_id,
     get_current_term,
@@ -23,12 +24,11 @@ from .transport import post_json
 
 # Bully 策略实现（按 node_id 字典序比较优先级）。
 class BullyElectionStrategy:
-    # 按 Bully 规则发起选举，只向更高优先级节点发起请求。
+    # 发起本地 election：仅向优先级更高的节点发送请求。
     def trigger_election(self, reason: str) -> Dict[str, Any]:
         round_info = begin_election_round(reason=reason)
         candidate_epoch = int(round_info["epoch"])
 
-        # Bully 只向“优先级更高”的节点发 election 请求。
         higher_nodes = [node_id for node_id in get_meta_peer_nodes() if node_id > META_NODE_ID]
         ok_nodes: List[str] = []
         failed_nodes: List[Dict[str, str]] = []
@@ -51,7 +51,7 @@ class BullyElectionStrategy:
                 failed_nodes.append({"node_id": peer_node_id, "error": str(exc)})
 
         if ok_nodes:
-            # 三节点场景下，一旦确认更高优先级节点存活，本节点立即让位为 follower，避免重复抢占抖动。
+            # 有更高优先级节点存活，本节点让位为 follower。
             defer_state = mark_election_deferred(
                 epoch=candidate_epoch,
                 reason=f"higher_node_alive:{reason}",
@@ -66,7 +66,7 @@ class BullyElectionStrategy:
                 "defer_state": defer_state,
             }
 
-        # 没有更高优先级节点存活，则当前 candidate 直接晋升为 leader。
+        # 没有更高优先级节点响应，当前节点当选 leader 并广播 coordinator。
         promote_info = promote_self_to_leader(epoch=candidate_epoch, reason=f"bully_win:{reason}")
         coordinator_lamport = tick_lamport(event="send_coordinator")
         broadcast_result = broadcast_coordinator(
@@ -83,7 +83,7 @@ class BullyElectionStrategy:
             "broadcast": broadcast_result,
         }
 
-    # 按 Bully 规则处理入站 election 请求，并决定是否建议本地预抢占选举。
+    # 处理入站 election 请求，返回是否 ack 以及是否建议本地发起预抢占。
     def handle_incoming_election(
         self,
         candidate_id: str,
@@ -96,10 +96,11 @@ class BullyElectionStrategy:
         before_epoch = get_leader_epoch()
         before_leader = normalize_node_id(get_current_leader_id())
         known_nodes = known_meta_nodes()
+        has_higher_priority = META_NODE_ID > normalized_candidate_id
 
         tick_lamport(event="recv_election", incoming_lamport=int(lamport))
 
-        # 以下请求视为 stale：未知节点、候选者是自己、epoch 倒退、同 epoch 但已存在更高优先级 leader。
+        # stale 条件：未知节点、自己给自己发、epoch 倒退、同 epoch 但已存在更高优先级 leader。
         stale = (
             normalized_candidate_id not in known_nodes
             or normalized_candidate_id == META_NODE_ID
@@ -112,22 +113,32 @@ class BullyElectionStrategy:
             )
         )
 
-        if not stale:
-            # 收到更高 epoch 的 candidate 时，先更新本地 epoch 并降级为 follower（fencing）。
-            observe_candidate_epoch(candidate_epoch=normalized_epoch, reason=f"incoming_election:{reason}")
+        # 关键修复：高优先级节点收到更高 epoch 请求时抬升 epoch floor，
+        # 避免自己继续发送旧 epoch heartbeat，导致低优先级节点反复忽略并重新发起 election。
+        if has_higher_priority and not stale and normalized_epoch > before_epoch:
+            align_epoch_floor(
+                min_epoch=normalized_epoch,
+                reason=f"incoming_election_floor:{reason}",
+            )
+
+        # 仅在对方优先级更高时执行降级 fencing。
+        if not stale and not has_higher_priority:
+            observe_candidate_epoch(
+                candidate_epoch=normalized_epoch,
+                reason=f"incoming_election:{reason}",
+            )
 
         local_role = get_node_role()
         current_leader_id = normalize_node_id(get_current_leader_id())
         current_epoch = get_leader_epoch()
-        has_higher_priority = META_NODE_ID > normalized_candidate_id
         is_self_leader = local_role == "leader" and get_current_leader_id() == META_NODE_ID
-        # 三节点稳定化：若本地已知同/更高 epoch 的更高优先级 leader，则只回复 ok，不再重复触发本地选举。
+
         has_known_higher_or_equal_leader = bool(
             current_leader_id
             and current_epoch >= normalized_epoch
             and current_leader_id >= normalized_candidate_id
         )
-        # 重入冷却期内不主动抢主，优先等待现任 leader 继续收敛。
+
         rejoin_holdoff = get_rejoin_election_holdoff()
         rejoin_guard_active = bool(rejoin_holdoff.get("active", False))
         should_start_local_election = bool(
@@ -151,7 +162,7 @@ class BullyElectionStrategy:
             "lamport": resp_lamport,
         }
 
-    # Bully 模式下不参与 quorum 投票，返回协议级“已处理但不支持”。
+    # Bully 模式不参与 quorum vote，返回协议级“不支持”。
     def handle_incoming_vote_request(
         self,
         candidate_id: str,

@@ -19,9 +19,9 @@ def _normalize_status(raw_status: str) -> str:
 # 规范化 runtime role 字段，避免非法角色值进入 membership。
 def normalize_meta_role(raw_role: str) -> str:
     role = str(raw_role or "").strip().lower()
-    if role in {"leader", "follower", "candidate"}:
+    if role in {"leader", "follower", "candidate", "unknown"}:
         return role
-    return "follower"
+    return "unknown"
 
 
 # 规范化 voted_for 字段，统一节点 ID 表达并兼容空值。

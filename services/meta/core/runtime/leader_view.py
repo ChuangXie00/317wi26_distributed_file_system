@@ -91,6 +91,22 @@ def observe_candidate_epoch(candidate_epoch: int, reason: str) -> Dict[str, Any]
         }
 
 
+# 仅抬升 epoch 下限（epoch floor），不改变当前 leader/role。
+# 用于 Bully 场景下高优先级节点收到更高 epoch 选举请求时快速对齐时钟，避免后续 heartbeat 被低 epoch 过滤。
+def align_epoch_floor(min_epoch: int, reason: str) -> Dict[str, Any]:
+    normalized_epoch = max(0, int(min_epoch))
+    with _RUNTIME_LOCK:
+        changed = False
+        if normalized_epoch > int(_RUNTIME_STATE.get("leader_epoch", 0)):
+            changed = _set_epoch_unlocked(normalized_epoch, reason=f"epoch_floor:{reason}")
+        return {
+            "changed": bool(changed),
+            "role": str(_RUNTIME_STATE.get("role", "follower")),
+            "leader_id": str(_RUNTIME_STATE.get("current_leader_id", "")),
+            "leader_epoch": int(_RUNTIME_STATE.get("leader_epoch", 0)),
+        }
+
+
 # 观测 leader 信息（heartbeat/coordinator），并执行 fencing 降级规则。
 def observe_leader(leader_id: str, leader_epoch: int, reason: str) -> Dict[str, Any]:
     normalized_leader = str(leader_id or "").strip()

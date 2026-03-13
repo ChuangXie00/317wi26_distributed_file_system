@@ -8,7 +8,6 @@ import StorageTable from './cluster/StorageTable.vue'
   <section class="panel reveal" style="--delay: 130ms">
     <header class="panel__head">
       <h2 class="panel__title">Cluster Panel</h2>
-      <span class="panel__meta">meta / storage 节点空态骨架</span>
     </header>
 
     <div class="panel__body subgrid subgrid--2">

@@ -16,19 +16,19 @@ async function submitConfirmed() {
 
 <template>
   <article v-if="isVisible" class="feedback-card">
-    <header class="feedback-card__head">确认执行高风险动作</header>
+    <header class="feedback-card__head">High Risk Action</header>
     <div class="feedback-card__body">
-      <p>目标节点：{{ modalState.target || '--' }}</p>
-      <p>动作：{{ modalState.action || '--' }}</p>
-      <p>原因：{{ modalState.reason || '--' }}</p>
-      <p class="feedback-hint">此操作可能触发主从切换与短时不可用，请确认。</p>
+      <p>Target：{{ modalState.target || '--' }}</p>
+      <p>Action：{{ modalState.action || '--' }}</p>
+      <p>Reason：{{ modalState.reason || '--' }}</p>
+      <p class="feedback-hint">This operation may trigger the switch and unavailability. Please confirm.</p>
 
       <div class="btn-row">
         <button type="button" class="btn" :disabled="isSubmitting" @click="actionStore.closeConfirm()">
-          取消
+          Cancel
         </button>
         <button type="button" class="btn btn--danger" :disabled="isSubmitting" @click="submitConfirmed">
-          {{ isSubmitting ? '执行中...' : '确认执行' }}
+          {{ isSubmitting ? 'processing...' : 'Do it' }}
         </button>
       </div>
     </div>

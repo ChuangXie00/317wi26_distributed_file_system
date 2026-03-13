@@ -15,6 +15,6 @@ const term = computed(() => demoStateStore.state.snapshot?.leader_view?.current_
   <article class="kpi-tile">
     <p class="kpi-tile__label">Observed Leader</p>
     <p class="kpi-tile__value">{{ leader }}</p>
-    <p class="empty-state">epoch={{ epoch }} · term={{ term }}</p>
+    <p class="empty-state">epoch={{ epoch }},  term={{ term }}</p>
   </article>
 </template>

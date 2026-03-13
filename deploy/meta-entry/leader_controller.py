@@ -104,7 +104,7 @@ class ControllerConfig:
             switch_cooldown_sec=max(0.0, float(os.getenv("ENTRY_SWITCH_COOLDOWN_SEC", "6.0"))),
             request_timeout_sec=max(0.1, float(os.getenv("ENTRY_REQUEST_TIMEOUT_SEC", "1.2"))),
             # 开启后，entry 仅在“唯一可写 leader”成立时才允许切换。
-            require_single_writable_leader=str(os.getenv("ENTRY_REQUIRE_SINGLE_WRITABLE_LEADER", "0")).strip().lower()
+            require_single_writable_leader=str(os.getenv("ENTRY_REQUIRE_SINGLE_WRITABLE_LEADER", "1")).strip().lower()
             in {"1", "true", "yes", "on"},
             # 仅保留最近 N 次切换历史，避免状态文件无限增长。
             switch_history_limit=max(1, safe_int(os.getenv("ENTRY_SWITCH_HISTORY_LIMIT", "30"), 30)),
@@ -341,14 +341,6 @@ class LeaderSwitchController:
             "switch_blocked_by": "",
         }
 
-        # 候选与当前一致时清空 pending，保持稳定状态。
-        if candidate_leader_id == self.active_leader_id:
-            self.pending_leader_id = ""
-            self.pending_since_ts = 0.0
-            self.last_decision = "stable_active_leader"
-            decision["decision"] = self.last_decision
-            return decision
-
         if self.config.require_single_writable_leader:
             writable_nodes = list(consensus.get("writable_leader_nodes", []))
             unique_writable_leader = normalize_node_id(consensus.get("unique_writable_leader_id", ""))
@@ -361,15 +353,20 @@ class LeaderSwitchController:
                 decision["writable_leader_nodes"] = writable_nodes
                 return decision
 
-            # 只有唯一可写 leader 与候选 leader 一致时才允许进入切换路径。
+            # 若已明确唯一可写 leader，则以该节点作为最终候选，避免旧观测把 active 卡在不可写节点。
             if unique_writable_leader and unique_writable_leader != candidate_leader_id:
-                self.pending_leader_id = ""
-                self.pending_since_ts = 0.0
-                self.last_decision = "switch_blocked_writable_leader_mismatch"
-                decision["decision"] = self.last_decision
-                decision["switch_blocked_by"] = "writable_leader_mismatch"
-                decision["unique_writable_leader_id"] = unique_writable_leader
-                return decision
+                candidate_leader_id = unique_writable_leader
+                selection_reason = "single_writable_leader_hint"
+                decision["candidate_leader_id"] = candidate_leader_id
+                decision["selection_reason"] = selection_reason
+
+        # 候选与当前一致时清空 pending，保持稳定状态。
+        if candidate_leader_id == self.active_leader_id:
+            self.pending_leader_id = ""
+            self.pending_since_ts = 0.0
+            self.last_decision = "stable_active_leader"
+            decision["decision"] = self.last_decision
+            return decision
 
         # 首次观察到新候选时只进入 pending，不立即切流。
         if candidate_leader_id != self.pending_leader_id:

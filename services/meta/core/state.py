@@ -367,33 +367,48 @@ def refresh_meta_membership(state: State, now_ts: Optional[float] = None) -> boo
         except (URLError, TimeoutError, OSError, RuntimeError, UnicodeDecodeError, json.JSONDecodeError):
             pass
 
-        peer_entry = _new_meta_membership_entry(
-            node_id=node_id,
-            now_ts=now_ts,
-            status=peer_status,
-            role=str(peer_payload.get("role", previous_entry.get("role", "follower"))),
-            current_leader_id=str(
-                peer_payload.get(
-                    "leader",
-                    peer_payload.get("current_leader_id", previous_entry.get("current_leader_id", "")),
-                )
-            ),
-            leader_epoch=max(0, _safe_int(peer_payload.get("leader_epoch", previous_entry.get("leader_epoch", 0)))),
-            current_term=max(
-                0,
-                _safe_int(
+        if peer_status == "alive":
+            peer_entry = _new_meta_membership_entry(
+                node_id=node_id,
+                now_ts=now_ts,
+                status=peer_status,
+                role=str(peer_payload.get("role", previous_entry.get("role", "follower"))),
+                current_leader_id=str(
                     peer_payload.get(
-                        "current_term",
-                        peer_payload.get("term", previous_entry.get("current_term", previous_entry.get("leader_epoch", 0))),
+                        "leader",
+                        peer_payload.get("current_leader_id", previous_entry.get("current_leader_id", "")),
                     )
                 ),
-            ),
-            voted_for=str(peer_payload.get("voted_for", previous_entry.get("voted_for", ""))),
-            lamport=max(0, _safe_int(peer_payload.get("lamport", previous_entry.get("lamport", 0)))),
-            writable_leader=bool(peer_payload.get("writable_leader", previous_entry.get("writable_leader", False)))
-            and peer_status == "alive",
-            source=peer_source,
-        )
+                leader_epoch=max(0, _safe_int(peer_payload.get("leader_epoch", previous_entry.get("leader_epoch", 0)))),
+                current_term=max(
+                    0,
+                    _safe_int(
+                        peer_payload.get(
+                            "current_term",
+                            peer_payload.get("term", previous_entry.get("current_term", previous_entry.get("leader_epoch", 0))),
+                        )
+                    ),
+                ),
+                voted_for=str(peer_payload.get("voted_for", previous_entry.get("voted_for", ""))),
+                lamport=max(0, _safe_int(peer_payload.get("lamport", previous_entry.get("lamport", 0)))),
+                writable_leader=bool(peer_payload.get("writable_leader", previous_entry.get("writable_leader", False))),
+                source=peer_source,
+            )
+        else:
+            # peer 不可达时主动降级为 unknown，避免沿用陈旧角色造成“dead 但仍是 leader/follower”的误导。
+            peer_entry = _new_meta_membership_entry(
+                node_id=node_id,
+                now_ts=now_ts,
+                status="dead",
+                role="unknown",
+                current_leader_id="",
+                leader_epoch=0,
+                current_term=max(0, _safe_int(previous_entry.get("current_term", previous_entry.get("leader_epoch", 0)))),
+                voted_for="",
+                lamport=max(0, _safe_int(previous_entry.get("lamport", 0))),
+                writable_leader=False,
+                source=peer_source,
+            )
         if previous_entry != peer_entry:
             membership[node_id] = peer_entry
             changed = True

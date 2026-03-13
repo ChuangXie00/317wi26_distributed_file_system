@@ -5,7 +5,7 @@ import { useDemoStateStore } from '../../../stores/demoStateStore'
 
 const demoStateStore = useDemoStateStore()
 
-// meta 节点表：融合 membership 与 leader_view，保证 leader 标识可见。
+// meta 节点表：优先使用 membership 的角色视图，observed leader 仅作高优先级覆盖。
 const rows = computed(() => {
   const snapshot = demoStateStore.state.snapshot || {}
   const membership = snapshot?.membership_view?.membership || {}
@@ -13,7 +13,9 @@ const rows = computed(() => {
 
   const idsFromMembership = Object.keys(membership).filter((nodeId) => nodeId.startsWith('meta-'))
   const idsFromLeaderView = Array.isArray(snapshot?.leader_view?.meta_cluster)
-    ? snapshot.leader_view.meta_cluster.filter((nodeId) => String(nodeId).startsWith('meta-'))
+    ? snapshot.leader_view.meta_cluster
+        .map((item) => (typeof item === 'string' ? item : item?.node_id))
+        .filter((nodeId) => String(nodeId || '').startsWith('meta-'))
     : []
 
   const nodeIds = [...new Set([...idsFromMembership, ...idsFromLeaderView])].sort()
@@ -26,10 +28,24 @@ const rows = computed(() => {
   }
 
   return nodeIds.map((nodeId) => {
-    const status = membership?.[nodeId]?.status || '--'
+    const nodeInfo = membership?.[nodeId] || {}
+    const status = nodeInfo?.status || '--'
+    const membershipRole = String(nodeInfo?.role || '')
+      .trim()
+      .toLowerCase()
+    const roleFromMembership = ['leader', 'follower', 'candidate', 'unknown'].includes(membershipRole)
+      ? membershipRole
+      : 'follower'
+
+    // dead 节点不展示旧角色，避免出现“dead 但 leader/follower”的误导。
+    let role = status === 'dead' ? 'unknown' : roleFromMembership
+    if (nodeId === observedLeader) {
+      role = 'leader'
+    }
+
     return {
       id: nodeId,
-      role: nodeId === observedLeader ? 'leader' : 'follower',
+      role,
       status
     }
   })

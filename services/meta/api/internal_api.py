@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Header
 
 from core.config import META_NODE_ID
 
@@ -94,6 +94,10 @@ def internal_coordinator(req: CoordinatorReq) -> CoordinatorResp:
 
 
 @router.post("/internal/storage_heartbeat", response_model=StorageHeartbeatResp)
-def storage_heartbeat(req: StorageHeartbeatReq) -> StorageHeartbeatResp:
-    result = process_storage_heartbeat(req.node_id)
+def storage_heartbeat(
+    req: StorageHeartbeatReq,
+    x_meta_forwarded_by: str | None = Header(default=None, alias="X-Meta-Forwarded-By"),
+) -> StorageHeartbeatResp:
+    # follower 转发链路会带 X-Meta-Forwarded-By，避免重复转发形成环路。
+    result = process_storage_heartbeat(req.node_id, forwarded_by=str(x_meta_forwarded_by or ""))
     return StorageHeartbeatResp(**result)

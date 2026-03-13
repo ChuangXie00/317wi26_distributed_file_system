@@ -1,4 +1,5 @@
 from .leader_view import (
+    align_epoch_floor,
     begin_election_round,
     force_rejoin_as_follower,
     mark_election_deferred,
@@ -57,6 +58,7 @@ __all__ = [
     "step_down_to_follower",
     "observe_term",
     "mark_voted_for",
+    "align_epoch_floor",
     "begin_election_round",
     "mark_election_deferred",
     "promote_self_to_leader",

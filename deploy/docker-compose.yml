@@ -38,7 +38,7 @@ services:
       - ENTRY_SWITCH_COOLDOWN_SEC=6.0
       - ENTRY_REQUEST_TIMEOUT_SEC=1.2
       # 0.1p5.3 增量：默认关闭严格门禁，需要时可改为 1 做“唯一可写 leader”约束。
-      - ENTRY_REQUIRE_SINGLE_WRITABLE_LEADER=0
+      - ENTRY_REQUIRE_SINGLE_WRITABLE_LEADER=1
       - ENTRY_SWITCH_HISTORY_LIMIT=30
       - ENTRY_DEFAULT_LEADER_ID=meta-01
       - ENTRY_UPSTREAM_CONF_PATH=/etc/nginx/conf.d/meta_upstream.conf

@@ -69,6 +69,7 @@ class StateAggregator:
         entry = _normalize_entry(merged.get("entry") or {})
         leader_view = _normalize_leader(merged.get("leader") or {})
         membership_view = _normalize_membership(merged.get("membership") or {})
+        leader_view = _reconcile_leader_view(entry, leader_view, membership_view)
         replication_view = _normalize_replication(merged.get("replication") or {})
         # 计算前端直接消费的衍生字段，避免 UI 重复推导。
         derived = _derive(entry, leader_view, membership_view, source_health)
@@ -183,6 +184,64 @@ def _normalize_replication(payload: dict[str, Any]) -> dict[str, Any]:
         "sync": sync,
         "takeover": _as_dict(payload.get("takeover")),
     }
+
+
+def _reconcile_leader_view(
+    entry: dict[str, Any],
+    leader_view: dict[str, Any],
+    membership_view: dict[str, Any],
+) -> dict[str, Any]:
+    # leader 与 membership 来自并发拉取，故障切换窗口可能出现短时不一致；这里做最小兜底对齐。
+    merged = dict(leader_view)
+    membership = membership_view.get("membership", {})
+    if not isinstance(membership, dict):
+        return merged
+
+    alive_meta_nodes: list[tuple[str, dict[str, Any]]] = []
+    for node_id, entry in membership.items():
+        if not isinstance(entry, dict):
+            continue
+        node_id_s = str(node_id).strip().lower()
+        node_type = str(entry.get("node_type", "")).strip().lower()
+        if node_type != "meta" and not node_id_s.startswith("meta-"):
+            continue
+        if str(entry.get("status", "dead")).strip().lower() != "alive":
+            continue
+        alive_meta_nodes.append((node_id_s, entry))
+
+    observed_leader_ids = {
+        str(entry.get("current_leader_id", "")).strip().lower()
+        for _, entry in alive_meta_nodes
+        if str(entry.get("current_leader_id", "")).strip()
+    }
+    writable_nodes = sorted(
+        node_id
+        for node_id, entry in alive_meta_nodes
+        if bool(entry.get("writable_leader", False))
+    )
+
+    unique_observed_leader = next(iter(observed_leader_ids)) if len(observed_leader_ids) == 1 else ""
+    unique_writable_leader = writable_nodes[0] if len(writable_nodes) == 1 else ""
+    current_leader = _as_str(merged.get("leader")).strip().lower()
+
+    if not current_leader:
+        if unique_writable_leader:
+            merged["leader"] = unique_writable_leader
+            current_leader = unique_writable_leader
+        elif unique_observed_leader:
+            merged["leader"] = unique_observed_leader
+            current_leader = unique_observed_leader
+        else:
+            # leader/membership 两路都缺失时，回退使用 entry 的 active_leader_id，避免前端 Observed Leader 长时间 "--"。
+            entry_leader = _as_str(entry.get("active_leader_id")).strip().lower()
+            if entry_leader:
+                merged["leader"] = entry_leader
+                current_leader = entry_leader
+
+    if not bool(merged.get("writable_leader", False)) and current_leader and unique_writable_leader == current_leader:
+        merged["writable_leader"] = True
+
+    return merged
 
 
 def _derive(

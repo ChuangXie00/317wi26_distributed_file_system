@@ -3,7 +3,13 @@ import threading
 import time
 from typing import Any, Dict
 
-from ..config import LEADER_ELECTION_MODE, META_CLUSTER_NODES, META_LEADER_HEARTBEAT_TIMEOUT_SEC, META_NODE_ID
+from ..config import (
+    LEADER_ELECTION_MODE,
+    META_CLUSTER_NODES,
+    META_HEARTBEAT_INTERVAL_SEC,
+    META_LEADER_HEARTBEAT_TIMEOUT_SEC,
+    META_NODE_ID,
+)
 from ..election import trigger_election
 from ..runtime import get_rejoin_election_holdoff, get_runtime_snapshot, is_writable_leader
 from .heartbeat_sync import push_state_to_followers
@@ -130,7 +136,9 @@ def _maybe_takeover_by_timeout() -> None:
     reference_ts = last_ts if last_ts > 0 else started_ts
     elapsed = max(0.0, time.time() - reference_ts)
     # quorum 模式使用“基础超时 + 节点偏移”作为生效阈值，避免多节点同拍触发选举。
-    effective_timeout_sec = float(META_LEADER_HEARTBEAT_TIMEOUT_SEC + _quorum_timeout_offset_sec())
+    # 让 timeout 至少覆盖 5 个 heartbeat 周期，降低偶发慢请求触发误选举的概率。
+    base_timeout_sec = max(float(META_LEADER_HEARTBEAT_TIMEOUT_SEC), float(META_HEARTBEAT_INTERVAL_SEC) * 5.0)
+    effective_timeout_sec = float(base_timeout_sec + _quorum_timeout_offset_sec())
 
     # 重入冷却期内不执行 timeout takeover，优先等待 leader 心跳恢复。
     rejoin_holdoff = get_rejoin_election_holdoff()

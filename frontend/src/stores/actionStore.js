@@ -96,7 +96,7 @@ export async function confirmAndExecute() {
 function showSuccessToast(result) {
   state.toast.visible = true
   state.toast.kind = 'success'
-  state.toast.title = '动作执行成功'
+  state.toast.title = 'Action Success'
   state.toast.message = `${result?.normalized_action || '--'} @ ${result?.target || '--'}`
   state.toast.actionResult = result || null
   state.toast.errorCode = ''
@@ -111,7 +111,7 @@ function showErrorToast(error, payload) {
 
   state.toast.visible = true
   state.toast.kind = 'error'
-  state.toast.title = '动作执行失败'
+  state.toast.title = 'Action Failed'
   state.toast.message = `${payload.action || '--'} @ ${payload.target || '--'}`
   state.toast.actionResult = null
   state.toast.errorCode = apiError.code
