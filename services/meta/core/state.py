@@ -11,7 +11,6 @@ from urllib.request import urlopen
 
 from .config import (
     DATA_DIR,
-    META_INTERNAL_TIMEOUT_SEC,
     META_NODE_ID,
     METADATA_FILE,
     ENABLE_STORAGE_HEALTHCHECK,
@@ -19,9 +18,14 @@ from .config import (
     STORAGE_HEALTHCHECK_TIMEOUT_SEC,
     STORAGE_NODES,
     STORAGE_PORT,
-    build_meta_base_url,
     get_meta_peer_nodes,
 )
+from .membership_codec import (
+    new_meta_membership_entry as _new_meta_membership_entry,
+    normalize_meta_role as _normalize_meta_role,
+    normalize_meta_voted_for as _normalize_meta_voted_for,
+)
+from .meta_probe import probe_meta_runtime as _probe_meta_runtime
 from .runtime import get_runtime_snapshot, is_writable_leader
 
 State = Dict[str, Any]
@@ -164,19 +168,6 @@ def _normalize_node_type(raw_node_type: str, node_id: str) -> str:
     return "meta" if str(node_id or "").strip().lower().startswith("meta-") else "storage"
 
 
-# 规范化 runtime role 字段，避免非法角色值进入 membership。
-def _normalize_meta_role(raw_role: str) -> str:
-    role = str(raw_role or "").strip().lower()
-    if role in {"leader", "follower", "candidate"}:
-        return role
-    return "follower"
-
-
-# 中文：规范化 voted_for 字段，统一节点 ID 表达并兼容空值。
-def _normalize_meta_voted_for(raw_voted_for: str) -> str:
-    return str(raw_voted_for or "").strip().lower()
-
-
 # 生成标准 membership 条目（storage 默认结构）。
 def _new_membership_entry(now_ts: float, status: str = "alive", node_type: str = "storage") -> MembershipEntry:
     return {
@@ -185,39 +176,6 @@ def _new_membership_entry(now_ts: float, status: str = "alive", node_type: str =
         "last_heartbeat_ts": float(now_ts),
         "last_heartbeat_at": _timestamp_to_iso(float(now_ts)),
     }
-
-
-# 生成 meta 节点 membership 条目（包含角色、leader 视图与 Lamport 观测）。
-def _new_meta_membership_entry(
-    node_id: str,
-    now_ts: float,
-    status: str = "alive",
-    role: str = "follower",
-    current_leader_id: str = "",
-    leader_epoch: int = 0,
-    current_term: int = 0,
-    voted_for: str = "",
-    lamport: int = 0,
-    writable_leader: bool = False,
-    source: str = "meta_runtime",
-) -> MembershipEntry:
-    base_entry = _new_membership_entry(now_ts, status=status, node_type="meta")
-    base_entry.update(
-        {
-            "role": _normalize_meta_role(role),
-            "current_leader_id": str(current_leader_id or "").strip().lower(),
-            "leader_epoch": max(0, int(leader_epoch)),
-            # 中文：quorum 任期号，优先使用 current_term；历史数据回落到 leader_epoch。
-            "current_term": max(0, int(current_term)),
-            # 中文：quorum 当前任期已投票对象（空字符串表示未投票）。
-            "voted_for": _normalize_meta_voted_for(voted_for),
-            "lamport": max(0, int(lamport)),
-            "writable_leader": bool(writable_leader),
-            "source": str(source or "").strip() or "meta_runtime",
-            "node_id": str(node_id or "").strip().lower(),
-        }
-    )
-    return base_entry
 
 
 # 兼容旧版 membership 结构，并按 node_type 统一输出规范化条目。
@@ -368,19 +326,6 @@ def refresh_storage_membership(state: State, now_ts: Optional[float] = None) -> 
     if apply_storage_heartbeat_timeout(state, now_ts=now_ts):
         changed = True
     return changed
-
-
-# 探测单个 meta peer 的 leader 运行态（用于更新 meta membership 条目）。
-def _probe_meta_runtime(node_id: str) -> Dict[str, Any]:
-    probe_url = f"{build_meta_base_url(node_id)}/debug/leader"
-    with urlopen(probe_url, timeout=META_INTERNAL_TIMEOUT_SEC) as response:
-        if response.status != 200:
-            raise RuntimeError(f"meta probe failed: status={response.status}, url={probe_url}")
-        raw = response.read()
-        payload = json.loads(raw.decode("utf-8")) if raw else {}
-        if not isinstance(payload, dict):
-            raise RuntimeError(f"meta probe payload invalid: url={probe_url}")
-        return payload
 
 
 # 刷新 meta membership：写入本地 runtime，并探测 peer 节点存活与 leader 视图。
