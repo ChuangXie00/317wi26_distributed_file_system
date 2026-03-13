@@ -69,6 +69,22 @@ class ReplicaMatrixResult:
         }
 
 
+@dataclass
+class FileListResult:
+    files: list[dict[str, Any]]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"files": self.files}
+
+
+@dataclass
+class FileDeleteResult:
+    file_name: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"status": "ok", "file_name": self.file_name}
+
+
 class DemoFileService:
     def __init__(self) -> None:
         # 统一走 meta-entry 入口，避免前端或 demo 后端直接绑定某个 leader 地址。
@@ -173,6 +189,42 @@ class DemoFileService:
             chunk_count=len(rows),
             rows=rows,
         )
+
+    def list_files(self, *, limit: int = 200) -> FileListResult:
+        payload = self._request_json(
+            method="GET",
+            url=f"{self.meta_base_url}/files?limit={max(1, min(int(limit), 1000))}",
+            error_code="DEMO-FILE-003",
+        )
+        items = payload.get("files")
+        if not isinstance(items, list):
+            raise DemoFileError(http_status=502, code="DEMO-FILE-003", message="invalid file list payload")
+
+        files: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            files.append(
+                {
+                    "file_name": str(item.get("file_name", "")).strip(),
+                    "chunk_count": int(item.get("chunk_count", 0) or 0),
+                    "created_at": str(item.get("created_at", "")),
+                    "updated_at": str(item.get("updated_at", "")),
+                }
+            )
+        return FileListResult(files=files)
+
+    def delete_file(self, *, file_name: str) -> FileDeleteResult:
+        normalized_name = str(file_name or "").strip()
+        if not normalized_name:
+            raise DemoFileError(http_status=400, code="DEMO-FILE-001", message="file_name is required")
+
+        self._request_json(
+            method="DELETE",
+            url=f"{self.meta_base_url}/file/{quote(normalized_name)}",
+            error_code="DEMO-FILE-002",
+        )
+        return FileDeleteResult(file_name=normalized_name)
 
     def _resolve_chunk_locations(self, fingerprint: str) -> list[str]:
         check_payload = self._request_json(

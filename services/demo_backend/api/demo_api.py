@@ -334,6 +334,60 @@ def get_file_replicas(
         )
 
 
+@router.get("/file/list")
+def get_file_list(
+    limit: int = Query(default=200, ge=1, le=1000),
+    x_request_id: str | None = Header(default=None, alias="X-Request-Id"),
+):
+    request_id = _request_id(x_request_id)
+    try:
+        result = file_service.list_files(limit=limit)
+        return _ok_response(request_id=request_id, data=result.to_dict())
+    except DemoFileError as exc:
+        return _error_response(
+            request_id=request_id,
+            status_code=exc.http_status,
+            code=exc.code,
+            message=exc.message,
+            details=exc.details or {},
+        )
+    except Exception as exc:
+        return _error_response(
+            request_id=request_id,
+            status_code=500,
+            code="DEMO-FILE-999",
+            message="unexpected file list error",
+            details={"error": str(exc)},
+        )
+
+
+@router.delete("/file/{file_name}")
+def delete_file(
+    file_name: str,
+    x_request_id: str | None = Header(default=None, alias="X-Request-Id"),
+):
+    request_id = _request_id(x_request_id)
+    try:
+        result = file_service.delete_file(file_name=file_name)
+        return _ok_response(request_id=request_id, data=result.to_dict())
+    except DemoFileError as exc:
+        return _error_response(
+            request_id=request_id,
+            status_code=exc.http_status,
+            code=exc.code,
+            message=exc.message,
+            details=exc.details or {},
+        )
+    except Exception as exc:
+        return _error_response(
+            request_id=request_id,
+            status_code=500,
+            code="DEMO-FILE-999",
+            message="unexpected file delete error",
+            details={"error": str(exc)},
+        )
+
+
 def _parse_int_query(
     raw: str | None,
     *,

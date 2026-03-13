@@ -23,6 +23,9 @@ from .vo import (
     ChunkRegisterResp,
     FileCommitReq,
     FileCommitResp,
+    FileDeleteResp,
+    FileListItem,
+    FileListResp,
     FileGetItem,
     FileGetResp,
 )
@@ -182,4 +185,32 @@ def file_get(file_name: str) -> FileGetResp:
         locations = [node for node in replicas if node in alive_set]
         out.append(FileGetItem(fingerprint=fp, locations=locations))
     return FileGetResp(chunks=out)
+
+
+@router.get("/files", response_model=FileListResp)
+def file_list(limit: int = 200) -> FileListResp:
+    files = REPO.list_files(limit=max(1, min(int(limit), 1000)))
+    out = [
+        FileListItem(
+            file_name=str(item.get("file_name", "")),
+            chunk_count=int(item.get("chunk_count", 0)),
+            created_at=str(item.get("created_at", "")),
+            updated_at=str(item.get("updated_at", "")),
+        )
+        for item in files
+    ]
+    return FileListResp(files=out)
+
+
+@router.delete("/file/{file_name}", response_model=FileDeleteResp)
+def file_delete(file_name: str) -> FileDeleteResp:
+    _ensure_leader_write_api()
+    tick_lamport(event="file_delete")
+
+    deleted = REPO.delete_file(file_name=file_name)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="file not found")
+
+    push_state_to_followers(reason="file_delete")
+    return FileDeleteResp(status="ok", file_name=file_name)
 

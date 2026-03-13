@@ -47,6 +47,22 @@ class FileGetResp(BaseModel):
     chunks: List[FileGetItem]
 
 
+class FileListItem(BaseModel):
+    file_name: str
+    chunk_count: int = Field(default=0, ge=0)
+    created_at: str = ""
+    updated_at: str = ""
+
+
+class FileListResp(BaseModel):
+    files: List[FileListItem] = Field(default_factory=list)
+
+
+class FileDeleteResp(BaseModel):
+    status: Literal["ok"]
+    file_name: str
+
+
 # storage -> meta 心跳请求体。
 class StorageHeartbeatReq(BaseModel):
     node_id: str = Field(..., min_length=1)

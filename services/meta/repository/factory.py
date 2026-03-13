@@ -38,6 +38,12 @@ class PostgresMetadataRepository:
     def get_file_chunks(self, file_name: str, namespace: Optional[str] = None) -> Optional[List[str]]:
         return self._file_repo.get_file_chunks(file_name, namespace)
 
+    def list_files(self, namespace: Optional[str] = None, limit: int = 200) -> List[Dict[str, Any]]:
+        return self._file_repo.list_files(namespace=namespace, limit=limit)
+
+    def delete_file(self, file_name: str, namespace: Optional[str] = None) -> bool:
+        return self._file_repo.delete_file(file_name=file_name, namespace=namespace)
+
     def db_health(self) -> Dict[str, Any]:
         with self._connections.connection() as conn:
             with conn.cursor() as cur:

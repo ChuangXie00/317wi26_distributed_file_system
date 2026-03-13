@@ -125,3 +125,48 @@ class FileRepository:
                 rows = cur.fetchall()
 
         return [str(r["fingerprint"]).strip() for r in rows]  # type: ignore[index]
+
+    def list_files(self, namespace: Optional[str] = None, limit: int = 200) -> List[dict]:
+        ns = str(namespace or self._default_namespace).strip() or self._default_namespace
+        fetch_limit = max(1, min(int(limit), 1000))
+
+        with self._connections.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT file_name, chunk_count, created_at, updated_at
+                    FROM dfs_meta.files
+                    WHERE namespace = %s
+                    ORDER BY updated_at DESC, file_name ASC
+                    LIMIT %s;
+                    """,
+                    (ns, fetch_limit),
+                )
+                rows = cur.fetchall()
+
+        out: List[dict] = []
+        for row in rows:
+            out.append(
+                {
+                    "file_name": str(row["file_name"]).strip(),  # type: ignore[index]
+                    "chunk_count": int(row["chunk_count"]),  # type: ignore[index]
+                    "created_at": str(row["created_at"]),  # type: ignore[index]
+                    "updated_at": str(row["updated_at"]),  # type: ignore[index]
+                }
+            )
+        return out
+
+    def delete_file(self, file_name: str, namespace: Optional[str] = None) -> bool:
+        ns = str(namespace or self._default_namespace).strip() or self._default_namespace
+        fn = str(file_name).strip()
+        if not fn:
+            return False
+
+        with self._connections.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM dfs_meta.files WHERE namespace = %s AND file_name = %s RETURNING id;",
+                    (ns, fn),
+                )
+                row = cur.fetchone()
+        return row is not None
