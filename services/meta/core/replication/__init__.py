@@ -17,6 +17,10 @@ from .runtime_loop import (
     start_replication_runtime,
     stop_replication_runtime,
 )
+from .rereplication_scheduler import (
+    start_rereplication_runtime,
+    stop_rereplication_runtime,
+)
 from .state_store import record_error, update_runtime
 from .takeover_scheduler import (
     _maybe_takeover_by_timeout,
@@ -41,5 +45,7 @@ __all__ = [
     "trigger_takeover_async",
     "start_replication_runtime",
     "stop_replication_runtime",
+    "start_rereplication_runtime",
+    "stop_rereplication_runtime",
     "get_replication_status",
 ]

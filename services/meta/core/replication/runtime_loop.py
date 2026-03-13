@@ -11,6 +11,7 @@ from ..config import (
 )
 from ..runtime import get_runtime_snapshot, is_writable_leader
 from .heartbeat_sync import _peer_urls, _send_heartbeat_to_peers, push_state_to_followers
+from .rereplication_scheduler import start_rereplication_runtime, stop_rereplication_runtime
 from .state_store import get_runtime_thread, read_runtime, reset_started_ts, set_runtime_thread, stop_event
 from .takeover_scheduler import _maybe_takeover_by_timeout
 
@@ -48,6 +49,7 @@ def start_replication_runtime() -> None:
     event = stop_event()
     event.clear()
     reset_started_ts()
+    start_rereplication_runtime()
     thread = threading.Thread(target=_replication_runtime_loop, name="meta-replication-runtime", daemon=True)
     set_runtime_thread(thread)
     thread.start()
@@ -62,6 +64,7 @@ def stop_replication_runtime() -> None:
     if thread is not None and thread.is_alive():
         thread.join(timeout=2.0)
     set_runtime_thread(None)
+    stop_rereplication_runtime()
 
 
 # 输出复制与接管状态，供 debug API 观测真实 leader/runtime 信息。
@@ -108,6 +111,7 @@ def get_replication_status() -> Dict[str, Any]:
             "last_takeover_detail": data.get("last_takeover_detail", {}),
             "election_in_progress": bool(data.get("election_in_progress", False)),
         },
+        "re_replication": data.get("re_replication", {}),
         "error": {
             "last_error": data.get("last_error", ""),
             "last_error_at": data.get("last_error_at", ""),

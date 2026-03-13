@@ -151,3 +151,37 @@ class ChunkRepository:
             node_id = str(row["node_id"]).strip()  # type: ignore[index]
             out[node_id] = int(row["replica_chunks"])  # type: ignore[index]
         return out
+
+    def list_chunk_replica_sets(self, limit: int = 5000) -> List[Dict[str, Any]]:
+        fetch_limit = max(1, min(int(limit), 20000))
+
+        with self._connections.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        c.fingerprint,
+                        COALESCE(
+                            array_agg(cr.node_id ORDER BY cr.node_id)
+                                FILTER (WHERE cr.node_id IS NOT NULL),
+                            ARRAY[]::TEXT[]
+                        ) AS replicas
+                    FROM dfs_meta.chunks c
+                    LEFT JOIN dfs_meta.chunk_replicas cr ON cr.chunk_id = c.id
+                    GROUP BY c.id, c.fingerprint
+                    ORDER BY c.id ASC
+                    LIMIT %s;
+                    """,
+                    (fetch_limit,),
+                )
+                rows = cur.fetchall()
+
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            fingerprint = str(row["fingerprint"]).strip().lower()  # type: ignore[index]
+            replicas_raw = row["replicas"]  # type: ignore[index]
+            replicas: List[str] = []
+            if isinstance(replicas_raw, (list, tuple)):
+                replicas = self._normalize_replicas([str(item) for item in replicas_raw])
+            out.append({"fingerprint": fingerprint, "replicas": replicas})
+        return out

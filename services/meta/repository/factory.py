@@ -32,6 +32,9 @@ class PostgresMetadataRepository:
     def get_replica_counts_by_node(self, node_ids: Optional[List[str]] = None) -> Dict[str, int]:
         return self._chunk_repo.get_replica_counts_by_node(node_ids)
 
+    def list_chunk_replica_sets(self, limit: int = 5000) -> List[Dict[str, Any]]:
+        return self._chunk_repo.list_chunk_replica_sets(limit=limit)
+
     def upsert_file(self, file_name: str, chunk_fingerprints: List[str], namespace: Optional[str] = None) -> None:
         self._file_repo.upsert_file(file_name, chunk_fingerprints, namespace)
 

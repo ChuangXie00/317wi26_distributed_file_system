@@ -37,6 +37,7 @@ _RUNTIME: Dict[str, Any] = {
     "last_takeover_ts": 0.0,
     "last_takeover_detail": {},
     "election_in_progress": False,
+    "re_replication": {},
 }
 
 
