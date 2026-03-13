@@ -4,6 +4,7 @@ import time
 
 from fastapi import APIRouter
 
+from core.config import STORAGE_NODES
 from core.replication import get_replication_status
 from core.runtime import get_runtime_snapshot, is_writable_leader
 from core.state import get_membership_snapshot, load_state, persist_state, refresh_cluster_membership
@@ -72,6 +73,12 @@ def debug_membership() -> dict:
     refreshed = _refresh_membership_for_debug(state)
 
     snapshot = get_membership_snapshot(state)
+    try:
+        replica_counts = REPO.get_replica_counts_by_node(STORAGE_NODES)
+    except Exception:
+        # 副本计数仅用于演示增强，不阻断 membership 主链路。
+        replica_counts = {}
+
     runtime = get_runtime_snapshot()
     meta_cluster = build_meta_cluster_view(snapshot)
     meta_cluster_summary = build_meta_cluster_summary(meta_cluster, local_node_id=str(runtime.get("node_id", "")))
@@ -81,7 +88,7 @@ def debug_membership() -> dict:
     meta_count = 0
     storage_count = 0
 
-    for entry in snapshot.values():
+    for node_id, entry in snapshot.items():
         status = str(entry.get("status", "dead"))
         node_type = str(entry.get("node_type", "storage")).strip().lower()
 
@@ -89,6 +96,10 @@ def debug_membership() -> dict:
             meta_count += 1
         else:
             storage_count += 1
+            replica_chunks = int(replica_counts.get(str(node_id), 0))
+            entry["replica_chunks"] = replica_chunks
+            # 兼容旧前端字段名，后续统一迁移到 replica_chunks。
+            entry["replicas"] = replica_chunks
 
         if status == "alive":
             alive_count += 1

@@ -1,4 +1,4 @@
-from typing import Any, List, Sequence
+from typing import Any, Dict, List, Sequence
 
 import psycopg
 
@@ -114,3 +114,40 @@ class ChunkRepository:
 
         existing = {str(r["fingerprint"]).strip() for r in rows}  # type: ignore[index]
         return [fp for fp in unique_fps if fp not in existing]
+
+    def get_replica_counts_by_node(self, node_ids: Sequence[str] | None = None) -> Dict[str, int]:
+        normalized_nodes: List[str] = []
+        if node_ids is not None:
+            normalized_nodes = self._normalize_replicas(node_ids)
+            if not normalized_nodes:
+                return {}
+
+        with self._connections.connection() as conn:
+            with conn.cursor() as cur:
+                if normalized_nodes:
+                    cur.execute(
+                        """
+                        SELECT cr.node_id, COUNT(1) AS replica_chunks
+                        FROM dfs_meta.chunk_replicas cr
+                        WHERE cr.node_id = ANY(%s)
+                        GROUP BY cr.node_id
+                        ORDER BY cr.node_id ASC;
+                        """,
+                        (normalized_nodes,),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT cr.node_id, COUNT(1) AS replica_chunks
+                        FROM dfs_meta.chunk_replicas cr
+                        GROUP BY cr.node_id
+                        ORDER BY cr.node_id ASC;
+                        """
+                    )
+                rows = cur.fetchall()
+
+        out: Dict[str, int] = {}
+        for row in rows:
+            node_id = str(row["node_id"]).strip()  # type: ignore[index]
+            out[node_id] = int(row["replica_chunks"])  # type: ignore[index]
+        return out

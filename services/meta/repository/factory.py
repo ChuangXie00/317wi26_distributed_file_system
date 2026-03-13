@@ -29,6 +29,9 @@ class PostgresMetadataRepository:
     def list_missing_chunks(self, fingerprints: List[str]) -> List[str]:
         return self._chunk_repo.list_missing_chunks(fingerprints)
 
+    def get_replica_counts_by_node(self, node_ids: Optional[List[str]] = None) -> Dict[str, int]:
+        return self._chunk_repo.get_replica_counts_by_node(node_ids)
+
     def upsert_file(self, file_name: str, chunk_fingerprints: List[str], namespace: Optional[str] = None) -> None:
         self._file_repo.upsert_file(file_name, chunk_fingerprints, namespace)
 

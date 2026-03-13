@@ -5,6 +5,14 @@ import { useDemoStateStore } from '../../../stores/demoStateStore'
 
 const demoStateStore = useDemoStateStore()
 
+function resolveReplicaDisplay(nodeInfo) {
+  const value = nodeInfo?.replica_chunks ?? nodeInfo?.replicas
+  if (value === null || value === undefined || value === '') {
+    return '--'
+  }
+  return value
+}
+
 // storage 节点表：读取 membership 中 storage-* 节点。
 const rows = computed(() => {
   const membership = demoStateStore.state.snapshot?.membership_view?.membership || {}
@@ -24,7 +32,7 @@ const rows = computed(() => {
     const nodeInfo = membership[nodeId] || {}
     return {
       id: nodeId,
-      replicas: nodeInfo.replicas || '--',
+      replicas: resolveReplicaDisplay(nodeInfo),
       status: nodeInfo.status || '--'
     }
   })
