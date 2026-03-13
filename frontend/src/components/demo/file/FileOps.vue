@@ -9,7 +9,8 @@ const filePanelStore = useFilePanelStore()
 const hiddenFileInputRef = ref(null)
 const selectedLocalFile = ref(null)
 const files = ref([])
-const sortBy = ref('time_desc')
+const sortKey = ref('updated_at')
+const sortDir = ref('desc')
 const isRefreshing = ref(false)
 const isUploading = ref(false)
 const isDownloading = ref(false)
@@ -19,23 +20,22 @@ const statusKind = ref('idle')
 const statusMessage = ref('请选择文件后可下载或删除。')
 
 const selectedFileName = computed(() => filePanelStore.state.selectedFileName)
-const selectedItem = computed(() => files.value.find((item) => item.file_name === selectedFileName.value) || null)
 
 const canDownload = computed(() => Boolean(selectedFileName.value) && !isUploading.value && !isDownloading.value && !isDeleting.value)
 const canDelete = computed(() => Boolean(selectedFileName.value) && !isUploading.value && !isDownloading.value && !isDeleting.value)
 
 const sortedFiles = computed(() => {
   const copied = [...files.value]
-  if (sortBy.value === 'name_asc') {
-    return copied.sort((a, b) => String(a.file_name).localeCompare(String(b.file_name)))
-  }
-  if (sortBy.value === 'name_desc') {
-    return copied.sort((a, b) => String(b.file_name).localeCompare(String(a.file_name)))
-  }
-  if (sortBy.value === 'time_asc') {
-    return copied.sort((a, b) => toTs(a.updated_at) - toTs(b.updated_at))
-  }
-  return copied.sort((a, b) => toTs(b.updated_at) - toTs(a.updated_at))
+  const direction = sortDir.value === 'asc' ? 1 : -1
+  return copied.sort((a, b) => {
+    if (sortKey.value === 'file_name') {
+      return String(a.file_name).localeCompare(String(b.file_name)) * direction
+    }
+    if (sortKey.value === 'chunk_count') {
+      return ((Number(a.chunk_count) || 0) - (Number(b.chunk_count) || 0)) * direction
+    }
+    return (toTs(a.updated_at) - toTs(b.updated_at)) * direction
+  })
 })
 
 const statusClass = computed(() => {
@@ -176,6 +176,23 @@ function isSelected(fileName) {
   return selectedFileName.value === fileName
 }
 
+function onSortColumn(columnKey) {
+  if (sortKey.value === columnKey) {
+    sortDir.value = sortDir.value === 'asc' ? 'desc' : 'asc'
+    return
+  }
+  sortKey.value = columnKey
+  // 文件名默认升序，其它字段默认降序。
+  sortDir.value = columnKey === 'file_name' ? 'asc' : 'desc'
+}
+
+function sortIndicator(columnKey) {
+  if (sortKey.value !== columnKey) {
+    return ''
+  }
+  return sortDir.value === 'asc' ? '↑' : '↓'
+}
+
 function formatTime(raw) {
   const value = String(raw || '').trim()
   if (!value) {
@@ -235,13 +252,13 @@ async function saveBytesWithPicker(bytes, fileName) {
 </script>
 
 <template>
-  <article class="panel">
+  <article class="panel fileops__panel">
     <header class="panel__head">
       <h3 class="panel__title">File</h3>
-      <span class="panel__meta">manage files and selection</span>
+      <span class="panel__meta">Stored Files ({{ files.length }})</span>
     </header>
 
-    <div class="panel__body subgrid">
+    <div class="panel__body subgrid fileops__body">
       <input ref="hiddenFileInputRef" class="fileops__hidden-input" type="file" @change="onPickFile" />
 
       <div class="fileops__toolbar">
@@ -258,26 +275,19 @@ async function saveBytesWithPicker(bytes, fileName) {
         </button>
       </div>
 
-      <div class="fileops__list-head">
-        <p class="panel__meta">Stored Files ({{ files.length }})</p>
-        <label class="fileops__sort">
-          sort
-          <select v-model="sortBy" class="fileops__select">
-            <option value="time_desc">time desc</option>
-            <option value="time_asc">time asc</option>
-            <option value="name_asc">name asc</option>
-            <option value="name_desc">name desc</option>
-          </select>
-        </label>
-      </div>
-
       <div class="fileops__list-wrap">
         <table class="table fileops__table">
           <thead>
             <tr>
-              <th>File</th>
-              <th>Chunks</th>
-              <th>Updated</th>
+              <th class="fileops__sortable" @click="onSortColumn('file_name')">
+                File <span class="fileops__sort-indicator">{{ sortIndicator('file_name') }}</span>
+              </th>
+              <th class="fileops__sortable" @click="onSortColumn('chunk_count')">
+                Chunks <span class="fileops__sort-indicator">{{ sortIndicator('chunk_count') }}</span>
+              </th>
+              <th class="fileops__sortable" @click="onSortColumn('updated_at')">
+                Updated <span class="fileops__sort-indicator">{{ sortIndicator('updated_at') }}</span>
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -299,7 +309,6 @@ async function saveBytesWithPicker(bytes, fileName) {
         </table>
       </div>
 
-      <p class="empty-state" :class="statusClass">{{ statusMessage }}</p>
     </div>
 
     <div v-if="showDeleteConfirm" class="fileops__modal-backdrop" @click="closeDeleteConfirm">
@@ -327,6 +336,14 @@ async function saveBytesWithPicker(bytes, fileName) {
   display: none;
 }
 
+.fileops__panel {
+  height: 100%;
+}
+
+.fileops__body {
+  height: 100%;
+}
+
 .fileops__toolbar {
   display: flex;
   align-items: center;
@@ -334,32 +351,8 @@ async function saveBytesWithPicker(bytes, fileName) {
   gap: 10px;
 }
 
-.fileops__list-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.fileops__sort {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 0.76rem;
-  color: var(--ink-soft);
-}
-
-.fileops__select {
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 5px 8px;
-  background: rgba(255, 255, 255, 0.92);
-  color: var(--ink-1);
-  font-size: 0.78rem;
-}
-
 .fileops__list-wrap {
-  max-height: 280px;
+  height: 520px;
   overflow: auto;
   border: 1px solid rgba(200, 213, 234, 0.78);
   border-radius: 12px;
@@ -367,6 +360,21 @@ async function saveBytesWithPicker(bytes, fileName) {
 
 .fileops__table tbody tr {
   cursor: pointer;
+}
+
+.fileops__sortable {
+  cursor: pointer;
+  user-select: none;
+}
+
+.fileops__sortable:hover {
+  color: var(--ink-1);
+}
+
+.fileops__sort-indicator {
+  display: inline-block;
+  width: 14px;
+  text-align: center;
 }
 
 .fileops__row--active {

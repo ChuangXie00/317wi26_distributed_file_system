@@ -41,7 +41,7 @@ async function loadMatrixForSelection() {
     currentFileName.value = result.file_name || targetName
     rows.value = Array.isArray(result.rows) ? result.rows : []
     statusKind.value = 'ok'
-    statusMessage.value = `matrix loaded: chunks=${result.chunk_count ?? rows.value.length}`
+    statusMessage.value = `chunk = ${result.chunk_count ?? rows.value.length}`
   } catch (error) {
     rows.value = []
     currentFileName.value = targetName
@@ -65,13 +65,10 @@ function shortFingerprint(value) {
   <article class="panel">
     <header class="panel__head">
       <h3 class="panel__title">Replica Matrix</h3>
-      <span class="panel__meta">linked with selected file</span>
+      <span class="panel__meta">{{ statusMessage }}</span>
     </header>
     <div class="panel__body subgrid">
-      <p class="empty-state" :class="{ 'replica__status--error': statusKind === 'error' }">{{ statusMessage }}</p>
-
       <div v-if="rows.length" class="replica__table-wrap">
-        <p class="panel__meta">file={{ currentFileName }} <span v-if="isLoading">(refreshing...)</span></p>
         <table class="table">
           <thead>
             <tr>
@@ -96,12 +93,8 @@ function shortFingerprint(value) {
 </template>
 
 <style scoped>
-.replica__status--error {
-  border-color: rgba(196, 63, 84, 0.3);
-  background: rgba(196, 63, 84, 0.08);
-}
-
 .replica__table-wrap {
-  overflow-x: auto;
+  height: 520px;
+  overflow: auto;
 }
 </style>
