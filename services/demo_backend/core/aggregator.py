@@ -1,4 +1,6 @@
 import threading
+import time
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -25,6 +27,9 @@ class StateAggregator:
         self._snapshot_seq = 0
         # 每个 source 最近一次有效快照，用于降级回退。
         self._last_valid: dict[str, dict[str, Any]] = {}
+        # 演示优化：动作成功后短时间内对已 stop 的 meta 节点做本地状态覆盖。
+        self._optimistic_dead_meta_until: dict[str, float] = {}
+        self._optimistic_ttl_sec = max(1.0, float(os.getenv("DEMO_OPTIMISTIC_STOP_TTL_SEC", "20")))
 
     def aggregate(self) -> AggregationResult:
         # 并发拉取四个上游源。
@@ -69,6 +74,7 @@ class StateAggregator:
         entry = _normalize_entry(merged.get("entry") or {})
         leader_view = _normalize_leader(merged.get("leader") or {})
         membership_view = _normalize_membership(merged.get("membership") or {})
+        self._apply_optimistic_overlay(entry, leader_view, membership_view)
         leader_view = _reconcile_leader_view(entry, leader_view, membership_view)
         replication_view = _normalize_replication(merged.get("replication") or {})
         # 计算前端直接消费的衍生字段，避免 UI 重复推导。
@@ -87,6 +93,110 @@ class StateAggregator:
                 "warnings": warnings,
             },
         )
+
+    def apply_optimistic_action(self, *, normalized_action: str, target: str) -> None:
+        action = str(normalized_action or "").strip().lower()
+        node_id = str(target or "").strip().lower()
+        if not node_id.startswith("meta-"):
+            return
+
+        with self._lock:
+            if action == "stop":
+                self._optimistic_dead_meta_until[node_id] = time.time() + self._optimistic_ttl_sec
+                return
+            if action in {"start", "reload"}:
+                self._optimistic_dead_meta_until.pop(node_id, None)
+
+    def _apply_optimistic_overlay(
+        self,
+        entry: dict[str, Any],
+        leader_view: dict[str, Any],
+        membership_view: dict[str, Any],
+    ) -> None:
+        now = time.time()
+        with self._lock:
+            active_dead_meta_nodes = {
+                node_id
+                for node_id, expires_at in self._optimistic_dead_meta_until.items()
+                if expires_at > now
+            }
+            # 清理已过期覆盖，避免状态无限累积。
+            self._optimistic_dead_meta_until = {
+                node_id: expires_at
+                for node_id, expires_at in self._optimistic_dead_meta_until.items()
+                if expires_at > now
+            }
+
+        if not active_dead_meta_nodes:
+            return
+
+        membership = membership_view.get("membership", {})
+        if not isinstance(membership, dict):
+            membership = {}
+            membership_view["membership"] = membership
+
+        for node_id in active_dead_meta_nodes:
+            node_entry = membership.get(node_id)
+            if not isinstance(node_entry, dict):
+                node_entry = {"node_type": "meta"}
+                membership[node_id] = node_entry
+
+            node_entry["node_type"] = "meta"
+            node_entry["status"] = "dead"
+            node_entry["role"] = "unknown"
+            node_entry["current_leader_id"] = ""
+            node_entry["writable_leader"] = False
+
+        # 若存活节点仍观测到已 stop 的 leader，覆盖为未知，避免 Observed Leader 继续显示离线节点。
+        for node_id, node_entry in membership.items():
+            if not isinstance(node_entry, dict):
+                continue
+            node_type = str(node_entry.get("node_type", "")).strip().lower()
+            if node_type != "meta" and not str(node_id).strip().lower().startswith("meta-"):
+                continue
+            observed_leader = str(node_entry.get("current_leader_id", "")).strip().lower()
+            if observed_leader in active_dead_meta_nodes:
+                node_entry["current_leader_id"] = ""
+
+        # 同步覆盖 leader meta_cluster 视图，避免 Meta Table 与 leader_view 不一致。
+        meta_cluster = leader_view.get("meta_cluster")
+        if isinstance(meta_cluster, list):
+            for item in meta_cluster:
+                if not isinstance(item, dict):
+                    continue
+                node_id = str(item.get("node_id", "")).strip().lower()
+                if node_id not in active_dead_meta_nodes:
+                    continue
+                item["status"] = "dead"
+                item["role"] = "unknown"
+                item["current_leader_id"] = ""
+                item["writable_leader"] = False
+                continue
+
+            for item in meta_cluster:
+                if not isinstance(item, dict):
+                    continue
+                observed_leader = str(item.get("current_leader_id", "")).strip().lower()
+                if observed_leader in active_dead_meta_nodes:
+                    item["current_leader_id"] = ""
+
+        current_leader = _as_str(leader_view.get("leader")).strip().lower()
+        if current_leader in active_dead_meta_nodes:
+            leader_view["leader"] = ""
+            leader_view["writable_leader"] = False
+
+        active_leader_id = _as_str(entry.get("active_leader_id")).strip().lower()
+        if active_leader_id in active_dead_meta_nodes:
+            entry["active_leader_id"] = ""
+            entry["pending_leader_id"] = ""
+            entry["last_decision"] = "pending_failover"
+
+        pending_leader_id = _as_str(entry.get("pending_leader_id")).strip().lower()
+        if pending_leader_id in active_dead_meta_nodes:
+            entry["pending_leader_id"] = ""
+
+        membership_view["summary"] = _build_summary(membership)
+        membership_view["node_type_summary"] = _build_node_type_summary(membership)
 
 
 def _normalize_entry(payload: dict[str, Any]) -> dict[str, Any]:

@@ -140,6 +140,10 @@ async def post_action(request: Request, x_request_id: str | None = Header(defaul
         # 执行动作并记录 action.succeeded 事件。
         result = action_executor.execute_request(action_request)
         result_data = result.to_dict()
+        state_aggregator.apply_optimistic_action(
+            normalized_action=action_request.normalized_action,
+            target=action_request.target,
+        )
         event_engine.emit_action_succeeded(result_data)
         return _ok_response(request_id=request_id, data=result_data)
     except DemoApiError as exc:
