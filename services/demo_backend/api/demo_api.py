@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from core.action_executor import ActionExecutor
 from core.aggregator import StateAggregator
 from core.event_engine import ALLOWED_EVENT_FILTERS, EventEngine
+from core.metrics_engine import MetricsEngine
 from core.schemas import DemoApiError, parse_action_request
 from infra.meta_entry_client import MetaEntryClient
 
@@ -20,6 +21,8 @@ state_aggregator = StateAggregator(MetaEntryClient())
 action_executor = ActionExecutor()
 # 事件引擎：负责时间线缓存、增量查询和标准事件生产。
 event_engine = EventEngine()
+# 指标引擎：负责 /metrics 口径聚合与无样本处理。
+metrics_engine = MetricsEngine(event_engine)
 
 
 def _request_id(x_request_id: str | None) -> str:
@@ -97,9 +100,11 @@ def get_state(x_request_id: str | None = Header(default=None, alias="X-Request-I
             message=result.error_message or "all upstream debug sources unavailable",
             details=result.error_details,
         )
+
     # 每次成功 state 拉取后，把快照送入事件引擎做差分检测。
-    event_engine.ingest_snapshot(result.data or {})
-    return _ok_response(request_id=request_id, data=result.data or {})
+    snapshot = result.data or {}
+    event_engine.ingest_snapshot(snapshot)
+    return _ok_response(request_id=request_id, data=snapshot)
 
 
 @router.post("/action")
@@ -132,8 +137,9 @@ async def post_action(request: Request, x_request_id: str | None = Header(defaul
 
         # 执行动作并记录 action.succeeded 事件。
         result = action_executor.execute_request(action_request)
-        event_engine.emit_action_succeeded(result.to_dict())
-        return _ok_response(request_id=request_id, data=result.to_dict())
+        result_data = result.to_dict()
+        event_engine.emit_action_succeeded(result_data)
+        return _ok_response(request_id=request_id, data=result_data)
     except DemoApiError as exc:
         # 校验通过后才有 action_request；否则说明是纯参数错误，不应写失败事件。
         action_request = _safe_parse_action_request(payload)
@@ -147,7 +153,6 @@ async def post_action(request: Request, x_request_id: str | None = Header(defaul
                 details=exc.details,
                 correlation_id=action_request.client_request_id or request_id,
             )
-        # 业务已知异常：按约定错误码原样透出。
         return _error_response(
             request_id=request_id,
             status_code=exc.http_status,
@@ -156,6 +161,7 @@ async def post_action(request: Request, x_request_id: str | None = Header(defaul
             details=exc.details,
         )
     except Exception as exc:
+        # 兜底异常：统一降为控制执行失败，并记录 action.failed 事件。
         action_request = _safe_parse_action_request(payload)
         if action_request is not None:
             event_engine.emit_action_failed(
@@ -167,7 +173,6 @@ async def post_action(request: Request, x_request_id: str | None = Header(defaul
                 details={"error": str(exc)},
                 correlation_id=action_request.client_request_id or request_id,
             )
-        # 兜底异常：统一降为控制执行失败。
         return _error_response(
             request_id=request_id,
             status_code=500,
@@ -206,8 +211,33 @@ def get_events(request: Request, x_request_id: str | None = Header(default=None,
             message="event engine error",
             details={"error": str(exc)},
         )
-
     return _ok_response(request_id=request_id, data=data)
+
+
+@router.get("/metrics")
+def get_metrics(x_request_id: str | None = Header(default=None, alias="X-Request-Id")):
+    # 指标接口：输出恢复耗时和关键 KPI；无样本时按契约返回 503。
+    request_id = _request_id(x_request_id)
+    try:
+        result = metrics_engine.collect()
+    except Exception as exc:
+        return _error_response(
+            request_id=request_id,
+            status_code=500,
+            code="DEMO-EVT-001",
+            message="metrics engine error",
+            details={"error": str(exc)},
+        )
+
+    if not result.has_sample:
+        return _error_response(
+            request_id=request_id,
+            status_code=503,
+            code="DEMO-MET-001",
+            message="metrics sample not ready",
+            details=result.data,
+        )
+    return _ok_response(request_id=request_id, data=result.data)
 
 
 def _parse_int_query(

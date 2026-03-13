@@ -47,31 +47,46 @@ class EventEngine:
         # 下一个事件序号（单调递增）。
         self._next_seq = 1
 
-        # 以下状态用于 state 快照差分，生成 leader/entry/node 变化事件。
+        # 这些字段用于 state 快照差分，生成 leader/entry/node 变化事件。
         self._last_leader = ""
         self._last_entry_active_leader = ""
         self._last_node_status: dict[str, str] = {}
 
+        # 指标相关状态：用于 /metrics 输出与恢复耗时口径计算。
+        self._leader_switch_count = 0
+        self._last_failover_started_at: str | None = None
+        self._last_failover_recovered_at: str | None = None
+        self._last_failover_recovery_seconds: float | None = None
+
+        # 恢复流程状态机：用于识别 recovery.started -> recovery.completed。
+        self._recovery_in_progress = False
+        self._recovery_start_dt: datetime | None = None
+        self._recovery_anchor_leader = ""
+        self._recovery_stable_cycles = 0
+        self._recovery_incomplete_emitted = False
+
     def ingest_snapshot(self, snapshot: dict[str, Any]) -> None:
-        # 基于最新状态快照做差分，产出 leader/entry/node 标准事件。
+        # 基于最新状态快照做差分，产出 leader/entry/node 标准事件，并推进恢复状态机。
         with self._lock:
             leader_view = _as_dict(snapshot.get("leader_view"))
             entry = _as_dict(snapshot.get("entry"))
             membership_view = _as_dict(snapshot.get("membership_view"))
             membership = _as_dict(membership_view.get("membership"))
 
+            previous_leader = self._last_leader
             current_leader = _as_str(leader_view.get("leader"))
-            if self._last_leader and current_leader and current_leader != self._last_leader:
+            if previous_leader and current_leader and current_leader != previous_leader:
+                self._leader_switch_count += 1
                 self._append_event_locked(
                     event_type="leader.switched",
                     severity="info",
                     entity_type="meta",
                     entity_id=current_leader,
                     title="Leader switched",
-                    message=f"leader changed {self._last_leader} -> {current_leader}",
+                    message=f"leader changed {previous_leader} -> {current_leader}",
                     correlation_id="",
                     payload={
-                        "from_leader": self._last_leader,
+                        "from_leader": previous_leader,
                         "to_leader": current_leader,
                     },
                 )
@@ -124,7 +139,22 @@ class EventEngine:
                             "to_status": status,
                         },
                     )
+
+                # 观测型恢复起点：当前 leader 从 alive -> suspected/dead 时触发。
+                if (
+                    node_id == previous_leader
+                    and prev_status == "alive"
+                    and status in {"suspected", "dead"}
+                ):
+                    self._start_recovery_locked(
+                        anchor_leader=previous_leader,
+                        reason="leader_alive_to_unhealthy",
+                        correlation_id="",
+                        payload={"node_id": node_id, "from_status": prev_status, "to_status": status},
+                    )
             self._last_node_status = next_node_status
+
+            self._evaluate_recovery_completion_locked(entry=entry, leader_view=leader_view)
 
     def emit_action_accepted(
         self,
@@ -152,6 +182,20 @@ class EventEngine:
                     "client_request_id": client_request_id,
                 },
             )
+
+            # 操作型恢复起点：收到 stop 且目标为当前 leader（meta 节点）时触发。
+            if (
+                normalized_action == "stop"
+                and target.startswith("meta-")
+                and self._last_leader
+                and target == self._last_leader
+            ):
+                self._start_recovery_locked(
+                    anchor_leader=target,
+                    reason="action_stop_current_leader",
+                    correlation_id=correlation_id,
+                    payload={"input_action": input_action, "normalized_action": normalized_action, "target": target},
+                )
 
     def emit_action_succeeded(self, result: dict[str, Any]) -> None:
         # 动作成功事件：关联 action_id，供时间线与结果卡片联动。
@@ -236,6 +280,124 @@ class EventEngine:
                 "has_more": has_more,
             }
 
+    def get_metrics_snapshot(self, sampling_window_seconds: int) -> dict[str, Any]:
+        # 读取 metrics 快照：由 /metrics 接口直接透传。
+        with self._lock:
+            return {
+                "failover_recovery_seconds": self._last_failover_recovery_seconds,
+                "last_failover_started_at": self._last_failover_started_at,
+                "last_failover_recovered_at": self._last_failover_recovered_at,
+                "leader_switch_count": self._leader_switch_count,
+                "event_backlog": len(self._events),
+                "sampling_window_seconds": sampling_window_seconds,
+            }
+
+    def has_recovery_sample(self) -> bool:
+        # 是否已产生有效恢复样本。
+        with self._lock:
+            return self._last_failover_recovery_seconds is not None
+
+    def emit_recovery_incomplete_if_needed(self) -> None:
+        # 无有效样本时写入 recovery.incomplete，避免每次 /metrics 都重复刷屏。
+        with self._lock:
+            if self._last_failover_recovery_seconds is not None:
+                return
+            if self._recovery_in_progress:
+                return
+            if self._recovery_incomplete_emitted:
+                return
+            self._append_event_locked(
+                event_type="recovery.incomplete",
+                severity="warn",
+                entity_type="recovery",
+                entity_id="cluster",
+                title="Recovery sample incomplete",
+                message="no valid failover recovery sample yet",
+                correlation_id="",
+                payload={},
+            )
+            self._recovery_incomplete_emitted = True
+
+    def _start_recovery_locked(
+        self,
+        *,
+        anchor_leader: str,
+        reason: str,
+        correlation_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        # 仅在未开始时启动恢复计时，防止重复触发覆盖 t_start。
+        if self._recovery_in_progress:
+            return
+        if not anchor_leader:
+            return
+
+        self._recovery_in_progress = True
+        self._recovery_start_dt = _utc_now_dt()
+        self._recovery_anchor_leader = anchor_leader
+        self._recovery_stable_cycles = 0
+        self._last_failover_started_at = _dt_to_iso(self._recovery_start_dt)
+        self._recovery_incomplete_emitted = False
+
+        data = dict(payload)
+        data.update({"reason": reason, "anchor_leader": anchor_leader})
+        self._append_event_locked(
+            event_type="recovery.started",
+            severity="info",
+            entity_type="recovery",
+            entity_id=anchor_leader,
+            title="Recovery started",
+            message=f"recovery timer started for leader {anchor_leader}",
+            correlation_id=correlation_id,
+            payload=data,
+        )
+
+    def _evaluate_recovery_completion_locked(self, *, entry: dict[str, Any], leader_view: dict[str, Any]) -> None:
+        # 满足连续 2 个采样周期条件后，判定恢复完成并计算耗时。
+        if not self._recovery_in_progress:
+            return
+        if self._recovery_start_dt is None:
+            return
+
+        active_leader = _as_str(entry.get("active_leader_id"))
+        observed_leader = _as_str(leader_view.get("leader"))
+        single_observed_leader = bool(observed_leader)
+        single_writable_leader = bool(leader_view.get("writable_leader"))
+        switched_to_new_leader = bool(active_leader) and active_leader != self._recovery_anchor_leader
+
+        if switched_to_new_leader and single_observed_leader and single_writable_leader:
+            self._recovery_stable_cycles += 1
+        else:
+            self._recovery_stable_cycles = 0
+
+        if self._recovery_stable_cycles < 2:
+            return
+
+        completed_at = _utc_now_dt()
+        duration_seconds = (completed_at - self._recovery_start_dt).total_seconds()
+        self._last_failover_recovered_at = _dt_to_iso(completed_at)
+        self._last_failover_recovery_seconds = round(duration_seconds, 3)
+
+        self._append_event_locked(
+            event_type="recovery.completed",
+            severity="info",
+            entity_type="recovery",
+            entity_id=active_leader or observed_leader,
+            title="Recovery completed",
+            message=f"recovery completed in {self._last_failover_recovery_seconds}s",
+            correlation_id="",
+            payload={
+                "anchor_leader": self._recovery_anchor_leader,
+                "active_leader_id": active_leader,
+                "observed_leader": observed_leader,
+                "failover_recovery_seconds": self._last_failover_recovery_seconds,
+            },
+        )
+
+        self._recovery_in_progress = False
+        self._recovery_start_dt = None
+        self._recovery_stable_cycles = 0
+
     def _append_event_locked(
         self,
         *,
@@ -251,7 +413,7 @@ class EventEngine:
         # 仅可在持锁状态调用：保证 seq 连续且事件写入原子化。
         event = DemoEvent(
             seq=self._next_seq,
-            ts=_utc_now(),
+            ts=_dt_to_iso(_utc_now_dt()),
             type=event_type,
             severity=severity,
             entity_type=entity_type,
@@ -281,8 +443,12 @@ def _node_entity_type(node_id: str) -> str:
     return "node"
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+def _utc_now_dt() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _dt_to_iso(value: datetime) -> str:
+    return value.isoformat().replace("+00:00", "Z")
 
 
 def _as_str(value: Any) -> str:
