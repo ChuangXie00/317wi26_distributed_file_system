@@ -148,11 +148,39 @@ def _normalize_membership(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _normalize_replication(payload: dict[str, Any]) -> dict[str, Any]:
-    # replication 子视图统一保证四个对象字段存在。
+    # Support two upstream formats:
+    # 1) legacy: heartbeat/snapshot/sync/takeover
+    # 2) current: leader_heartbeat + replication + takeover
+    heartbeat = _as_dict(payload.get("heartbeat"))
+    snapshot = _as_dict(payload.get("snapshot"))
+    sync = _as_dict(payload.get("sync"))
+
+    leader_heartbeat = _as_dict(payload.get("leader_heartbeat"))
+    replication = _as_dict(payload.get("replication"))
+
+    # Fill heartbeat when only leader_heartbeat is provided.
+    if not heartbeat and leader_heartbeat:
+        heartbeat = leader_heartbeat
+
+    # Split replication composite object into snapshot/sync views.
+    if not snapshot and replication:
+        snapshot = {
+            "last_snapshot_sent_at": _as_str(replication.get("last_snapshot_sent_at")),
+            "last_snapshot_success_at": _as_str(replication.get("last_snapshot_success_at")),
+        }
+    if not sync and replication:
+        sync = {
+            "last_sync_applied_at": _as_str(replication.get("last_sync_applied_at")),
+            "last_sync_source": _as_str(replication.get("last_sync_source")),
+            "last_sync_reason": _as_str(replication.get("last_sync_reason")),
+            "last_sync_lamport": _as_int(replication.get("last_sync_lamport")),
+            "last_applied_lamport": _as_int(replication.get("last_applied_lamport")),
+        }
+
     return {
-        "heartbeat": _as_dict(payload.get("heartbeat")),
-        "snapshot": _as_dict(payload.get("snapshot")),
-        "sync": _as_dict(payload.get("sync")),
+        "heartbeat": heartbeat,
+        "snapshot": snapshot,
+        "sync": sync,
         "takeover": _as_dict(payload.get("takeover")),
     }
 
