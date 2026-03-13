@@ -63,25 +63,22 @@ function formatTs(ts) {
 </script>
 
 <template>
-  <article class="kpi-tile kpi-detail">
+  <article class="kpi-tile">
     <p class="kpi-tile__label">Replication</p>
-    <div class="kpi-detail__body">
+    <p class="kpi-tile__value">{{ takeoverText }}</p>
+    <div class="chip-row">
       <span class="chip">heartbeat: {{ heartbeatText }}</span>
       <span class="chip">snapshot: {{ snapshotText }}</span>
       <span class="chip">sync: {{ syncText }}</span>
-      <span class="chip">takeover: {{ takeoverText }}</span>
     </div>
+    <p class="empty-state">takeover={{ takeoverText }}</p>
   </article>
 </template>
 
 <style scoped>
-.kpi-detail {
-  display: grid;
-  gap: 8px;
-}
-
-.kpi-detail__body {
-  display: grid;
+.chip-row {
+  display: inline-flex;
+  flex-wrap: wrap;
   gap: 8px;
 }
 </style>

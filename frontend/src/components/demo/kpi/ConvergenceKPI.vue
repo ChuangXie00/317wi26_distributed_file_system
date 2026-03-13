@@ -41,28 +41,21 @@ function boolChipClass(value) {
 </script>
 
 <template>
-  <article class="kpi-tile kpi-detail">
+  <article class="kpi-tile">
     <p class="kpi-tile__label">Convergence</p>
-    <div class="kpi-detail__body">
-      <span :class="boolChipClass(singleObservedLeader)">
-        single_observed_leader: {{ boolText(singleObservedLeader) }}
-      </span>
-      <span :class="boolChipClass(singleWritableLeader)">
-        single_writable_leader: {{ boolText(singleWritableLeader) }}
-      </span>
-      <p class="empty-state">observed_leader={{ observedLeaderId }}</p>
+    <p class="kpi-tile__value">{{ boolText(singleObservedLeader) }} / {{ boolText(singleWritableLeader) }}</p>
+    <div class="chip-row">
+      <span :class="boolChipClass(singleObservedLeader)">observed</span>
+      <span :class="boolChipClass(singleWritableLeader)">writable</span>
     </div>
+    <p class="empty-state">observed_leader={{ observedLeaderId }}</p>
   </article>
 </template>
 
 <style scoped>
-.kpi-detail {
-  display: grid;
-  gap: 8px;
-}
-
-.kpi-detail__body {
-  display: grid;
+.chip-row {
+  display: inline-flex;
+  flex-wrap: wrap;
   gap: 8px;
 }
 </style>
