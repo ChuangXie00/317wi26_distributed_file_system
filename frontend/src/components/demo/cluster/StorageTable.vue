@@ -1,17 +1,54 @@
 <script setup>
-// 占位数据：Commit 6 仅用于保证表格骨架完整可见。
-const rows = [
-  { id: 'storage-01', replicas: '--', status: '--' },
-  { id: 'storage-02', replicas: '--', status: '--' },
-  { id: 'storage-03', replicas: '--', status: '--' }
-]
+import { computed } from 'vue'
+
+import { useDemoStateStore } from '../../../stores/demoStateStore'
+
+const demoStateStore = useDemoStateStore()
+
+// storage 节点表：读取 membership 中 storage-* 节点。
+const rows = computed(() => {
+  const membership = demoStateStore.state.snapshot?.membership_view?.membership || {}
+  const nodeIds = Object.keys(membership)
+    .filter((nodeId) => nodeId.startsWith('storage-'))
+    .sort()
+
+  if (!nodeIds.length) {
+    return [
+      { id: 'storage-01', replicas: '--', status: '--' },
+      { id: 'storage-02', replicas: '--', status: '--' },
+      { id: 'storage-03', replicas: '--', status: '--' }
+    ]
+  }
+
+  return nodeIds.map((nodeId) => {
+    const nodeInfo = membership[nodeId] || {}
+    return {
+      id: nodeId,
+      replicas: nodeInfo.replicas || '--',
+      status: nodeInfo.status || '--'
+    }
+  })
+})
+
+function statusClass(status) {
+  if (status === 'alive') {
+    return 'chip chip--ok'
+  }
+  if (status === 'suspected') {
+    return 'chip chip--warn'
+  }
+  if (status === 'dead') {
+    return 'chip chip--danger'
+  }
+  return 'chip'
+}
 </script>
 
 <template>
   <article class="panel">
     <header class="panel__head">
       <h3 class="panel__title">Storage Table</h3>
-      <span class="chip">3 nodes</span>
+      <span class="chip">{{ rows.length }} nodes</span>
     </header>
     <div class="panel__body">
       <table class="table">
@@ -26,7 +63,9 @@ const rows = [
           <tr v-for="row in rows" :key="row.id">
             <td>{{ row.id }}</td>
             <td>{{ row.replicas }}</td>
-            <td>{{ row.status }}</td>
+            <td>
+              <span :class="statusClass(row.status)">{{ row.status }}</span>
+            </td>
           </tr>
         </tbody>
       </table>
