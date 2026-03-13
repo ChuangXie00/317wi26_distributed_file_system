@@ -2,6 +2,7 @@ import base64
 import hashlib
 import json
 import os
+import time
 from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -11,7 +12,7 @@ from urllib.request import Request, urlopen
 
 @dataclass
 class DemoFileError(Exception):
-    # 文件操作统一错误模型：供 API 层映射 http 状态码与标准 error code。
+    # 统一文件接口错误模型，用于 API 层稳定输出 error code 与详情。
     http_status: int
     code: str
     message: str
@@ -23,7 +24,7 @@ class DemoFileError(Exception):
 
 @dataclass
 class UploadResult:
-    # 上传结果：前端用于展示文件名、分块数与总字节数。
+    # 上传结果：返回给前端用于展示文件名、总字节与分块数量。
     file_name: str
     total_bytes: int
     chunk_count: int
@@ -38,7 +39,7 @@ class UploadResult:
 
 @dataclass
 class DownloadResult:
-    # 下载结果：以 base64 回传，便于前端直接还原为 Blob。
+    # 下载结果：内容以 base64 传回，前端再还原成 Blob。
     file_name: str
     total_bytes: int
     chunk_count: int
@@ -55,7 +56,7 @@ class DownloadResult:
 
 @dataclass
 class ReplicaMatrixResult:
-    # 副本矩阵结果：用于 File Panel 展示每个 chunk 的副本分布。
+    # 副本矩阵结果：用于 File Panel 展示 chunk 副本分布。
     file_name: str
     chunk_count: int
     rows: list[dict[str, Any]]
@@ -70,10 +71,13 @@ class ReplicaMatrixResult:
 
 class DemoFileService:
     def __init__(self) -> None:
-        # 复用 meta-entry 作为稳定入口，避免前端直接依赖 leader 节点地址。
+        # 统一走 meta-entry 入口，避免前端或 demo 后端直接绑定某个 leader 地址。
         self.meta_base_url = os.getenv("DEMO_META_ENTRY_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
         self.chunk_size = max(256 * 1024, int(os.getenv("DEMO_FILE_CHUNK_SIZE", str(1 * 1024 * 1024))))
         self.timeout_sec = float(os.getenv("DEMO_FILE_TIMEOUT_SEC", "20"))
+        # 上传重试参数：缓解 demo_backend 重启后短时间连接抖动导致的 DEMO-FILE-002。
+        self.upload_retry_count = max(1, int(os.getenv("DEMO_FILE_UPLOAD_RETRY", "3")))
+        self.upload_retry_backoff_sec = max(0.0, float(os.getenv("DEMO_FILE_UPLOAD_RETRY_BACKOFF_SEC", "0.2")))
         self.storage_hosts = _parse_storage_hosts(
             os.getenv(
                 "DEMO_STORAGE_HOSTS",
@@ -90,7 +94,7 @@ class DemoFileService:
 
         chunks = list(_iter_chunks(content, self.chunk_size))
         if not chunks:
-            # 空文件也允许提交，保留最小可演示语义。
+            # 空文件允许提交，保持最小可演示闭环。
             self._commit_file(file_name=normalized_name, chunk_fps=[])
             return UploadResult(file_name=normalized_name, total_bytes=0, chunk_count=0)
 
@@ -99,7 +103,11 @@ class DemoFileService:
             fingerprint = _sha256_hex(chunk_bytes)
             chunk_fps.append(fingerprint)
             locations = self._resolve_chunk_locations(fingerprint)
-            self._upload_chunk_to_locations(fingerprint=fingerprint, chunk_bytes=chunk_bytes, locations=locations)
+            self._upload_chunk_to_locations(
+                fingerprint=fingerprint,
+                chunk_bytes=chunk_bytes,
+                locations=locations,
+            )
 
         self._commit_file(file_name=normalized_name, chunk_fps=chunk_fps)
         return UploadResult(
@@ -114,7 +122,6 @@ class DemoFileService:
             raise DemoFileError(http_status=400, code="DEMO-FILE-001", message="file_name is required")
 
         chunks = self._fetch_file_metadata(normalized_name)
-
         out = bytearray()
         for item in chunks:
             if not isinstance(item, dict):
@@ -201,35 +208,50 @@ class DemoFileService:
 
     def _upload_chunk_to_locations(self, *, fingerprint: str, chunk_bytes: bytes, locations: list[str]) -> None:
         errors: list[str] = []
+        succeeded_nodes: list[str] = []
         for node_id in locations:
             storage_base = self.storage_hosts.get(node_id)
             if not storage_base:
                 errors.append(f"{node_id}: unmapped storage host")
                 continue
 
-            request = Request(
-                f"{storage_base}/chunk/upload",
-                method="PUT",
-                data=chunk_bytes,
-                headers={
-                    "fingerprint": fingerprint,
-                    "Content-Type": "application/octet-stream",
-                    "Accept": "application/json",
-                },
-            )
-            try:
-                with urlopen(request, timeout=self.timeout_sec) as response:
-                    if response.status != 200:
-                        errors.append(f"{node_id}: status={response.status}")
-            except (HTTPError, URLError, OSError) as exc:
-                errors.append(f"{node_id}: {exc}")
+            upload_ok = False
+            last_error = ""
+            # 对每个副本节点做有限重试，降低瞬时 502/timeout 导致整文件失败的概率。
+            for attempt in range(1, self.upload_retry_count + 1):
+                request = Request(
+                    f"{storage_base}/chunk/upload",
+                    method="PUT",
+                    data=chunk_bytes,
+                    headers={
+                        "fingerprint": fingerprint,
+                        "Content-Type": "application/octet-stream",
+                        "Accept": "application/json",
+                    },
+                )
+                try:
+                    with urlopen(request, timeout=self.timeout_sec) as response:
+                        if response.status == 200:
+                            upload_ok = True
+                            succeeded_nodes.append(node_id)
+                            break
+                        last_error = f"status={response.status}"
+                except (HTTPError, URLError, OSError) as exc:
+                    last_error = str(exc)
 
-        if errors:
+                if attempt < self.upload_retry_count and self.upload_retry_backoff_sec > 0:
+                    time.sleep(self.upload_retry_backoff_sec)
+
+            if not upload_ok:
+                errors.append(f"{node_id}: {last_error or 'upload failed'}")
+
+        # 允许“部分副本成功”通过：避免单个节点瞬时故障导致整次上传失败。
+        if not succeeded_nodes:
             raise DemoFileError(
                 http_status=502,
                 code="DEMO-FILE-002",
                 message=f"chunk upload failed: {fingerprint}",
-                details={"errors": errors},
+                details={"errors": errors, "locations": locations},
             )
 
     def _read_chunk_from_locations(self, *, fingerprint: str, locations: list[str]) -> bytes:
@@ -239,6 +261,7 @@ class DemoFileService:
             if not storage_base:
                 errors.append(f"{node_id}: unmapped storage host")
                 continue
+
             request = Request(
                 f"{storage_base}/chunk/{quote(fingerprint)}",
                 method="GET",
@@ -269,7 +292,7 @@ class DemoFileService:
         )
 
     def _fetch_file_metadata(self, file_name: str) -> list[dict[str, Any]]:
-        # 统一读取 file 元数据，供下载与副本矩阵共用。
+        # 统一读取 file 元数据，供下载与副本矩阵查询共用。
         meta_url = f"{self.meta_base_url}/file/{quote(file_name)}"
         metadata = self._request_json(method="GET", url=meta_url, error_code="DEMO-FILE-003")
         chunks = metadata.get("chunks")

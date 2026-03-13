@@ -1,4 +1,6 @@
-from typing import Dict
+import os
+import threading
+import time
 
 from fastapi import APIRouter
 
@@ -12,16 +14,35 @@ from .debug_view_builder import build_meta_cluster_summary, build_meta_cluster_v
 router = APIRouter()
 REPO = get_repository()
 
+# debug 刷新闸门：同一时间窗口内只允许一次 leader 侧 membership 刷新，
+# 避免 /debug/leader、/debug/membership、/debug/replication 并发请求重复探测 peers。
+_DEBUG_REFRESH_LOCK = threading.RLock()
+_DEBUG_REFRESH_MIN_INTERVAL_SEC = max(0.2, float(os.getenv("META_DEBUG_REFRESH_MIN_INTERVAL_SEC", "1.0")))
+_DEBUG_LAST_REFRESH_TS = 0.0
+
+
+def _refresh_membership_for_debug(state: dict) -> bool:
+    global _DEBUG_LAST_REFRESH_TS
+    if not is_writable_leader():
+        return False
+
+    now_ts = time.time()
+    with _DEBUG_REFRESH_LOCK:
+        if now_ts - _DEBUG_LAST_REFRESH_TS < _DEBUG_REFRESH_MIN_INTERVAL_SEC:
+            return False
+
+        refreshed = refresh_cluster_membership(state)
+        if refreshed:
+            persist_state(state)
+        _DEBUG_LAST_REFRESH_TS = time.time()
+        return True
+
 
 @router.get("/debug/leader")
 def debug_leader() -> dict:
     # 输出运行时 leader 视图 + meta 集群总览，便于三节点场景下直接观察收敛状态。
     state = load_state()
-    refreshed = False
-    if is_writable_leader():
-        refreshed = refresh_cluster_membership(state)
-        if refreshed:
-            persist_state(state)
+    refreshed = _refresh_membership_for_debug(state)
 
     snapshot = get_membership_snapshot(state)
     runtime = get_runtime_snapshot()
@@ -48,13 +69,7 @@ def debug_leader() -> dict:
 @router.get("/debug/membership")
 def debug_membership() -> dict:
     state = load_state()
-    refreshed = False
-
-    # 仅可写 leader 主动刷新完整 cluster membership，保证 debug 输出包含 meta/storage 最新状态。
-    if is_writable_leader():
-        refreshed = refresh_cluster_membership(state)
-        if refreshed:
-            persist_state(state)
+    refreshed = _refresh_membership_for_debug(state)
 
     snapshot = get_membership_snapshot(state)
     runtime = get_runtime_snapshot()
@@ -104,19 +119,15 @@ def debug_membership() -> dict:
 
 @router.get("/debug/repository")
 def debug_repository() -> dict:
-    # 用于快速观测 PostgreSQL 表健康和数据规模。
+    # 用于快速观察 PostgreSQL 表健康和数据规模。
     return REPO.db_health()
 
 
 @router.get("/debug/replication")
 def debug_replication() -> dict:
-    # 输出复制、心跳、接管、Lamport 的完整运行时信息，并补充 meta 集群观测面。
+    # 输出复制、心跳、接管、Lamport 的完整运行时信息，并补充 meta 集群观察面。
     state = load_state()
-    refreshed = False
-    if is_writable_leader():
-        refreshed = refresh_cluster_membership(state)
-        if refreshed:
-            persist_state(state)
+    refreshed = _refresh_membership_for_debug(state)
 
     snapshot = get_membership_snapshot(state)
     runtime = get_runtime_snapshot()

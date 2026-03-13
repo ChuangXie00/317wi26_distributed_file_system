@@ -17,10 +17,19 @@ class UpstreamResult:
 
 
 class MetaEntryClient:
-    def __init__(self, timeout_sec: float = 0.8) -> None:
+    def __init__(self, timeout_sec: float | None = None) -> None:
         # 默认对接 meta-entry/nginx debug 端口，支持环境变量覆盖。
-        base_url = os.getenv("DEMO_META_ENTRY_BASE_URL", "http://meta-entry:8000").rstrip("/")
-        self.timeout_sec = timeout_sec
+        # 默认走宿主机可访问的 meta-entry 端口，避免本地直接启动 demo_backend 时 DNS 不可解析。
+        base_url = os.getenv("DEMO_META_ENTRY_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
+        # debug/membership 在故障场景可能包含 peer 超时探测，默认放宽上游超时避免误判 source error。
+        timeout_raw = str(os.getenv("DEMO_UPSTREAM_TIMEOUT_SEC", "")).strip()
+        resolved_timeout = timeout_sec
+        if resolved_timeout is None:
+            try:
+                resolved_timeout = float(timeout_raw) if timeout_raw else 4.0
+            except ValueError:
+                resolved_timeout = 4.0
+        self.timeout_sec = max(0.2, float(resolved_timeout))
         # 四个标准 debug 源，后续由聚合器统一归并。
         self.endpoints = {
             "entry": os.getenv("DEMO_ENTRY_URL", f"{base_url}/debug/entry"),
