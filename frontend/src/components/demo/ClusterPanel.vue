@@ -11,8 +11,8 @@ import StorageTable from './cluster/StorageTable.vue'
     </header>
 
     <div class="panel__body subgrid subgrid--2">
-      <MetaTable />
       <StorageTable />
+      <MetaTable />
       <ActionBar class="cluster-action-bar" />
     </div>
   </section>

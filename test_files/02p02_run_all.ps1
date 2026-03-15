@@ -1,5 +1,11 @@
 [CmdletBinding()]
 param(
+    [switch]$PrepareDataset,
+    [switch]$DownloadGutenberg,
+    [switch]$GenerateMixedFiles,
+    [switch]$ForceRedownload,
+    [int]$SamplesPerSize = 20,
+    [int]$RandomSeed = 20260313,
     [string]$DatasetDir = "",
     [string]$OutputRoot = ""
 )
@@ -23,9 +29,31 @@ $steps = @(
 if (-not [string]::IsNullOrWhiteSpace($DatasetDir)) {
     $steps[0].Args += @("-DatasetDir", $DatasetDir)
 }
+if ($DownloadGutenberg) {
+    $steps[0].Args += @("-DownloadGutenberg")
+}
+if ($GenerateMixedFiles) {
+    $steps[0].Args += @("-GenerateMixedFiles")
+}
+if ($ForceRedownload) {
+    $steps[0].Args += @("-ForceRedownload")
+}
+$steps[0].Args += @("-SamplesPerSize", $SamplesPerSize, "-RandomSeed", $RandomSeed)
 
 $results = @()
 foreach ($step in $steps) {
+    if (($step.Name -eq "prepare") -and (-not $PrepareDataset)) {
+        Write-Host "[skip] prepare (enable with -PrepareDataset)"
+        $results += [pscustomobject]@{
+            step = $step.Name
+            script = $step.Script
+            success = $true
+            exit_code = 0
+            skipped = $true
+        }
+        continue
+    }
+
     $scriptPath = Join-Path $PSScriptRoot $step.Script
     if (-not (Test-Path -LiteralPath $scriptPath)) {
         throw "missing script: $scriptPath"
@@ -39,6 +67,7 @@ foreach ($step in $steps) {
         script = $step.Script
         success = $ok
         exit_code = $LASTEXITCODE
+        skipped = $false
     }
     if (-not $ok) {
         throw ("step failed: {0} exit_code={1}" -f $step.Name, $LASTEXITCODE)
@@ -48,6 +77,6 @@ foreach ($step in $steps) {
 Write-Host ""
 Write-Host "== 0.2p02 run_all summary =="
 $results | ForEach-Object {
-    Write-Host ("{0}: success={1} exit_code={2}" -f $_.step, $_.success, $_.exit_code)
+    Write-Host ("{0}: success={1} exit_code={2} skipped={3}" -f $_.step, $_.success, $_.exit_code, $_.skipped)
 }
 Write-Host "output_root=$OutputRoot"

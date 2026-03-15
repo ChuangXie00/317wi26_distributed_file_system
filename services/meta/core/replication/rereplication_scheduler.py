@@ -336,7 +336,12 @@ def _scan_and_repair_once() -> None:
             )
             return
 
-        replica_sets = REPO.list_chunk_replica_sets(limit=REREPLICATION_SCAN_CHUNK_LIMIT)
+        # Only scan chunks referenced by committed files to avoid chasing
+        # orphan chunk rows created by interrupted uploads.
+        replica_sets = REPO.list_chunk_replica_sets(
+            limit=REREPLICATION_SCAN_CHUNK_LIMIT,
+            only_referenced=True,
+        )
         for item in replica_sets:
             fingerprint = str(item.get("fingerprint", "")).strip().lower()
             replicas_raw = item.get("replicas")

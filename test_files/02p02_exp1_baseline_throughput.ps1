@@ -27,11 +27,16 @@ $result = Save-02p02SkeletonResult `
 $summary = $result.Summary | Select-Object *
 $summary | Add-Member -NotePropertyName concurrency_levels -NotePropertyValue $Concurrency -Force
 $summary | Add-Member -NotePropertyName metric_targets -NotePropertyValue @(
+    "files_per_sec",
     "logical_throughput_mbps",
     "latency_p50",
     "latency_p95",
     "latency_p99",
     "error_rate"
+) -Force
+$summary | Add-Member -NotePropertyName dataset_role_mapping -NotePropertyValue @(
+    "DS-MixedFiles => files_per_sec + latency_p50/p95/p99",
+    "Wiki raw/shards => logical_throughput_mbps"
 ) -Force
 Write-02p02Json -Path $result.SummaryPath -Data $summary
 

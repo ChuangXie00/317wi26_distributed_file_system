@@ -6,6 +6,7 @@ param(
     [string]$DatasetDir = "",
     [string]$DatasetRoot = "",
     [int]$SamplesPerSize = 20,
+    [int]$RandomSeed = 20260313,
     [string]$OutputRoot = ""
 )
 
@@ -68,11 +69,15 @@ function New-MixedFilesFromLargeText {
     param(
         [string]$LargeTextFolder,
         [string]$MixedFolder,
-        [int]$PerSize
+        [int]$PerSize,
+        [int]$Seed
     )
 
     $sizes = @(1024, 4096, 16384, 65536, 262144, 1048576)
-    $sourceFiles = Get-ChildItem -LiteralPath $LargeTextFolder -File
+    $sourceFiles = Get-ChildItem -LiteralPath $LargeTextFolder -File | Sort-Object Name
+    # Ensure reproducible dataset snapshots by resetting output folder before generation.
+    Get-ChildItem -LiteralPath $MixedFolder -File -ErrorAction SilentlyContinue | Remove-Item -Force
+    $rng = [System.Random]::new($Seed)
     $created = 0
     $index = 0
 
@@ -84,7 +89,7 @@ function New-MixedFilesFromLargeText {
             }
             for ($i = 0; $i -lt $PerSize; $i++) {
                 $startMax = $bytes.Length - $size
-                $start = Get-Random -Minimum 0 -Maximum ($startMax + 1)
+                $start = $rng.Next(0, $startMax + 1)
                 $slice = New-Object byte[] $size
                 [System.Buffer]::BlockCopy($bytes, $start, $slice, 0, $size)
                 $name = "mixed_{0:D5}_{1}.bin" -f $index, $size
@@ -132,7 +137,7 @@ if ($DownloadGutenberg) {
 }
 
 if ($GenerateMixedFiles) {
-    $mixedCreated = New-MixedFilesFromLargeText -LargeTextFolder $largeTextDir -MixedFolder $mixedDir -PerSize $SamplesPerSize
+    $mixedCreated = New-MixedFilesFromLargeText -LargeTextFolder $largeTextDir -MixedFolder $mixedDir -PerSize $SamplesPerSize -Seed $RandomSeed
 }
 
 if (-not [string]::IsNullOrWhiteSpace($DatasetDir)) {
@@ -157,6 +162,7 @@ $manifest = [pscustomobject]@{
     mixed_files = $mixed
     downloaded_files = $downloadedFiles
     mixed_created_this_run = $mixedCreated
+    random_seed = $RandomSeed
 }
 Write-02p02Json -Path $manifestPath -Data $manifest
 
@@ -179,6 +185,7 @@ $summary | Add-Member -NotePropertyName download_gutenberg -NotePropertyValue ([
 $summary | Add-Member -NotePropertyName generate_mixed_files -NotePropertyValue ([bool]$GenerateMixedFiles) -Force
 $summary | Add-Member -NotePropertyName samples_per_size -NotePropertyValue $SamplesPerSize -Force
 $summary | Add-Member -NotePropertyName mixed_created_this_run -NotePropertyValue $mixedCreated -Force
+$summary | Add-Member -NotePropertyName random_seed -NotePropertyValue $RandomSeed -Force
 Write-02p02Json -Path $result.SummaryPath -Data $summary
 
 Write-Host "== 0.2p02 prepare dataset =="
@@ -189,6 +196,7 @@ Write-Host "total_bytes=$($overall.total_bytes)"
 Write-Host "large_text_files=$($large.file_count) large_text_bytes=$($large.total_bytes)"
 Write-Host "mixed_files=$($mixed.file_count) mixed_bytes=$($mixed.total_bytes)"
 Write-Host "mixed_created_this_run=$mixedCreated"
+Write-Host "random_seed=$RandomSeed"
 Write-Host "manifest=$manifestPath"
 Write-Host "summary=$($result.SummaryPath)"
 Write-Host "raw=$($result.RawPath)"

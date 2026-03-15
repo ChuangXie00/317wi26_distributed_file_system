@@ -152,28 +152,48 @@ class ChunkRepository:
             out[node_id] = int(row["replica_chunks"])  # type: ignore[index]
         return out
 
-    def list_chunk_replica_sets(self, limit: int = 5000) -> List[Dict[str, Any]]:
+    def list_chunk_replica_sets(self, limit: int = 5000, only_referenced: bool = False) -> List[Dict[str, Any]]:
         fetch_limit = max(1, min(int(limit), 20000))
 
         with self._connections.connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT
-                        c.fingerprint,
-                        COALESCE(
-                            array_agg(cr.node_id ORDER BY cr.node_id)
-                                FILTER (WHERE cr.node_id IS NOT NULL),
-                            ARRAY[]::TEXT[]
-                        ) AS replicas
-                    FROM dfs_meta.chunks c
-                    LEFT JOIN dfs_meta.chunk_replicas cr ON cr.chunk_id = c.id
-                    GROUP BY c.id, c.fingerprint
-                    ORDER BY c.id ASC
-                    LIMIT %s;
-                    """,
-                    (fetch_limit,),
-                )
+                if only_referenced:
+                    cur.execute(
+                        """
+                        SELECT
+                            c.fingerprint,
+                            COALESCE(
+                                array_agg(cr.node_id ORDER BY cr.node_id)
+                                    FILTER (WHERE cr.node_id IS NOT NULL),
+                                ARRAY[]::TEXT[]
+                            ) AS replicas
+                        FROM dfs_meta.chunks c
+                        JOIN dfs_meta.file_chunks fc ON fc.chunk_id = c.id
+                        LEFT JOIN dfs_meta.chunk_replicas cr ON cr.chunk_id = c.id
+                        GROUP BY c.id, c.fingerprint
+                        ORDER BY c.id ASC
+                        LIMIT %s;
+                        """,
+                        (fetch_limit,),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT
+                            c.fingerprint,
+                            COALESCE(
+                                array_agg(cr.node_id ORDER BY cr.node_id)
+                                    FILTER (WHERE cr.node_id IS NOT NULL),
+                                ARRAY[]::TEXT[]
+                            ) AS replicas
+                        FROM dfs_meta.chunks c
+                        LEFT JOIN dfs_meta.chunk_replicas cr ON cr.chunk_id = c.id
+                        GROUP BY c.id, c.fingerprint
+                        ORDER BY c.id ASC
+                        LIMIT %s;
+                        """,
+                        (fetch_limit,),
+                    )
                 rows = cur.fetchall()
 
         out: List[Dict[str, Any]] = []
